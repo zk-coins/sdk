@@ -21,6 +21,7 @@
 
 import type { z } from 'zod';
 
+import { DEFAULT_REQUEST_TIMEOUT_MS, FALLBACK_API_URL } from './config.js';
 import { ApiError, HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
 import {
   BalanceResponseSchema,
@@ -39,8 +40,6 @@ import {
   type ResolveUsernameResponse,
   type SendResponse,
 } from './schemas.js';
-
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 
 /** Inputs to `POST /api/send` *before* signing. */
 export interface SendRequest {
@@ -116,7 +115,7 @@ export class ZkCoinsClient {
     // don't shim `process`.
     const envApiUrl =
       typeof process !== 'undefined' && process.env ? process.env.ZKCOINS_API_URL : undefined;
-    const rawUrl = opts.apiUrl ?? envApiUrl ?? 'https://api.zkcoins.app';
+    const rawUrl = opts.apiUrl ?? envApiUrl ?? FALLBACK_API_URL;
     if (!/^https?:\/\//.test(rawUrl)) {
       throw new Error(
         `ZkCoinsClient: invalid apiUrl ${JSON.stringify(opts.apiUrl)} — must start with http:// or https://`,
