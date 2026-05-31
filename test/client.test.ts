@@ -24,6 +24,77 @@ describe('ZkCoinsClient constructor', () => {
     expect(() => new ZkCoinsClient({ apiUrl: '' })).toThrow();
   });
 
+  it('falls back to api.zkcoins.app when no apiUrl is passed', async () => {
+    const seen: string[] = [];
+    const client = new ZkCoinsClient({
+      fetch: async (input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        seen.push(url);
+        return new Response(JSON.stringify({ network: 'Mainnet' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    expect(client.apiUrl).toBe('https://api.zkcoins.app');
+    await client.info();
+    expect(seen[0]).toBe('https://api.zkcoins.app/api/info');
+  });
+
+  it('also falls back when constructed with no options at all', async () => {
+    // Pins the zero-arg form `new ZkCoinsClient()` as a supported
+    // call shape — a regression that made `apiUrl` required again
+    // would surface here.
+    const origFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      seen.push(url);
+      return new Response(JSON.stringify({ network: 'Mainnet' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    try {
+      const client = new ZkCoinsClient();
+      expect(client.apiUrl).toBe('https://api.zkcoins.app');
+      await client.info();
+      expect(seen[0]).toBe('https://api.zkcoins.app/api/info');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('exposes the resolved apiUrl as a readonly instance property', () => {
+    const client = new ZkCoinsClient({ apiUrl: 'https://custom.test/' });
+    expect(client.apiUrl).toBe('https://custom.test'); // trailing slash stripped
+  });
+
+  it('reads ZKCOINS_API_URL env var when no apiUrl option is passed', () => {
+    const orig = process.env.ZKCOINS_API_URL;
+    process.env.ZKCOINS_API_URL = 'https://from-env.test/';
+    try {
+      const client = new ZkCoinsClient();
+      expect(client.apiUrl).toBe('https://from-env.test');
+    } finally {
+      if (orig === undefined) delete process.env.ZKCOINS_API_URL;
+      else process.env.ZKCOINS_API_URL = orig;
+    }
+  });
+
+  it('explicit option wins over env var', () => {
+    const orig = process.env.ZKCOINS_API_URL;
+    process.env.ZKCOINS_API_URL = 'https://from-env.test';
+    try {
+      const client = new ZkCoinsClient({ apiUrl: 'https://from-option.test' });
+      expect(client.apiUrl).toBe('https://from-option.test');
+    } finally {
+      if (orig === undefined) delete process.env.ZKCOINS_API_URL;
+      else process.env.ZKCOINS_API_URL = orig;
+    }
+  });
+
   it('strips a trailing slash from apiUrl', async () => {
     let observed = '';
     server.use(

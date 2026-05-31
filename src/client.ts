@@ -84,8 +84,14 @@ export interface HistoryOpts {
 
 /** Options for `new ZkCoinsClient({...})`. */
 export interface ZkCoinsClientOptions {
-  /** Base URL of the zkCoins node (no trailing slash). */
-  apiUrl: string;
+  /**
+   * Base URL of the zkCoins node (no trailing slash). Resolution
+   * order:
+   *   1. this option (programmatic override)
+   *   2. `ZKCOINS_API_URL` env var (Node / Bun / RN-with-Expo)
+   *   3. `https://api.zkcoins.app` (zero-config fallback)
+   */
+  apiUrl?: string;
   /** Override the global `fetch` (e.g. for testing or RN polyfills). */
   fetch?: typeof globalThis.fetch;
   /** Per-request abort timeout in ms. Default 120_000 (2 min). */
@@ -93,18 +99,31 @@ export interface ZkCoinsClientOptions {
 }
 
 export class ZkCoinsClient {
-  private readonly apiUrl: string;
+  /**
+   * The fully-qualified base URL this client talks to, after option
+   * resolution (caller's `apiUrl` or the internal fallback) and
+   * trailing-slash normalization. Exposed read-only so integrators
+   * and tests can introspect the effective endpoint without
+   * reaching into private state or re-deriving from options.
+   */
+  public readonly apiUrl: string;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
 
-  constructor(opts: ZkCoinsClientOptions) {
-    if (!opts.apiUrl || !/^https?:\/\//.test(opts.apiUrl)) {
+  constructor(opts: ZkCoinsClientOptions = {}) {
+    // Resolution order: explicit option > env var > inline fallback.
+    // `process.env` is guarded so the SDK loads in browsers that
+    // don't shim `process`.
+    const envApiUrl =
+      typeof process !== 'undefined' && process.env ? process.env.ZKCOINS_API_URL : undefined;
+    const rawUrl = opts.apiUrl ?? envApiUrl ?? 'https://api.zkcoins.app';
+    if (!/^https?:\/\//.test(rawUrl)) {
       throw new Error(
         `ZkCoinsClient: invalid apiUrl ${JSON.stringify(opts.apiUrl)} — must start with http:// or https://`,
       );
     }
     // Strip a trailing slash so consumers can pass either form.
-    this.apiUrl = opts.apiUrl.replace(/\/+$/, '');
+    this.apiUrl = rawUrl.replace(/\/+$/, '');
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }

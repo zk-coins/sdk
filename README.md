@@ -23,12 +23,11 @@ npm install @zkcoins/sdk
 ```ts
 import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 
-// 1. Create or restore an account. The SDK does not ship endpoint
-//    constants — pass the URL of the node you want to talk to.
+// 1. Create or restore an account. Node URL comes from
+//    process.env.ZKCOINS_API_URL — or the inline fallback if unset.
+//    See "Choosing a node" for how to override.
 const mnemonic = await generateMnemonic();
-const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-  apiUrl: 'https://api.zkcoins.app',
-});
+const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
 
 // 2. Read authoritative state from the server.
 const { balance, username } = await account.getBalance();
@@ -41,7 +40,13 @@ console.warn('proof id:', result.proofId);
 
 ## Choosing a node
 
-`@zkcoins/sdk` is a **protocol SDK**, not a service SDK — it has no built-in knowledge of any particular operator. The `apiUrl` you pass to `ZkCoinsAccount.fromMnemonic` or `new ZkCoinsClient({ apiUrl })` is the only thing that determines which node the wallet talks to.
+`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The node URL is resolved in this order:
+
+1. **Explicit option** — `ZkCoinsAccount.fromMnemonic(mnemonic, 0, { apiUrl: '…' })` or `new ZkCoinsClient({ apiUrl: '…' })`. Highest precedence.
+2. **`ZKCOINS_API_URL` env var** — set it once, every SDK call in that process picks it up.
+3. **Inline fallback** — `https://api.zkcoins.app` if neither of the above is set.
+
+The fallback exists so the zero-config path runs; it is **not** a recommendation about which operator to use.
 
 [zkcoins.app](https://zkcoins.app) is one such operator (one of hopefully many). It runs two public stages today:
 

@@ -1,7 +1,8 @@
 /**
  * Minimal end-to-end usage of `@zkcoins/sdk`. Run with:
  *
- *   ZKCOINS_API_URL=https://api.zkcoins.app npx tsx examples/basic.ts
+ *   npx tsx examples/basic.ts                    # uses the fallback URL
+ *   ZKCOINS_API_URL=https://… npx tsx examples/basic.ts   # override
  *
  * The example creates a brand-new account, asks the server for the
  * balance, attempts a mint (rejected on Mainnet — see the stages
@@ -11,10 +12,14 @@
  * never stores anything on disk, never holds state across function
  * calls beyond the in-memory `xpriv` and `numPubkeys` counter.
  *
- * The SDK does **not** ship endpoint constants. Pass the URL of the
- * zkCoins node you want to talk to via `ZKCOINS_API_URL` (any
- * self-hosted node works too). zkcoins.app — one of hopefully many
- * service providers — runs two public stages today:
+ * Node URL resolution order (handled inside the SDK, no boilerplate
+ * needed in user code):
+ *   1. explicit `{ apiUrl }` option (programmatic override)
+ *   2. `ZKCOINS_API_URL` env var
+ *   3. inline fallback
+ *
+ * zkcoins.app — one of hopefully many service providers — runs two
+ * public stages today:
  *
  *   - `https://api.zkcoins.app`     (Bitcoin Mainnet)
  *   - `https://dev-api.zkcoins.app` (Mutinynet — has the open faucet)
@@ -23,19 +28,14 @@
 import { generateMnemonic, ZkCoinsAccount, ApiError } from '@zkcoins/sdk';
 
 async function main(): Promise<void> {
-  const apiUrl = process.env.ZKCOINS_API_URL;
-  if (!apiUrl) {
-    throw new Error('ZKCOINS_API_URL must be set (e.g. https://api.zkcoins.app for Mainnet).');
-  }
-
   // 1. Generate a fresh BIP-39 mnemonic + derive the account.
+  //    No `apiUrl` needed here — the SDK reads ZKCOINS_API_URL from
+  //    the environment, falling back to its inline default.
   const mnemonic = await generateMnemonic();
   // eslint-disable-next-line no-console
   console.log('mnemonic:', mnemonic);
 
-  const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-    apiUrl,
-  });
+  const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
   // eslint-disable-next-line no-console
   console.log('address: ', account.address);
 
