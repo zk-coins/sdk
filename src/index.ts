@@ -17,3 +17,9 @@ export {
   deriveSigningKey,
 } from './derivation.js';
 export type { AccountKeys } from './derivation.js';
+
+export { signSchnorr, createCommitment } from './signing.js';
+export type { Commitment } from './signing.js';
+
+export { buildSendMessage, buildClaimMessage } from './messages.js';
+export type { SendMessageParams, ClaimMessageParams } from './messages.js';
