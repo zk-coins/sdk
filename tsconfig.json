@@ -19,7 +19,11 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@zkcoins/sdk": ["./src/index.ts"]
+    }
   },
   "include": ["src/**/*", "test/**/*", "examples/**/*", "*.config.ts"],
   "exclude": ["dist", "node_modules", "test/cross-rust/shim"]
