@@ -23,3 +23,32 @@ export type { Commitment } from './signing.js';
 
 export { buildSendMessage, buildClaimMessage } from './messages.js';
 export type { SendMessageParams, ClaimMessageParams } from './messages.js';
+
+export {
+  SendResponseSchema,
+  MintResponseSchema,
+  CommitResponseSchema,
+  BalanceResponseSchema,
+  UsernameResponseSchema,
+  ClaimUsernameResponseSchema,
+  ResolveUsernameResponseSchema,
+  CapabilitiesSchema,
+  InfoResponseSchema,
+  TxItemSchema,
+  HistoryResponseSchema,
+} from './schemas.js';
+export type {
+  SendResponse,
+  MintResponse,
+  CommitResponse,
+  BalanceResponse,
+  UsernameResponse,
+  ClaimUsernameResponse,
+  ResolveUsernameResponse,
+  Capabilities,
+  InfoResponse,
+  TxItem,
+  HistoryResponse,
+} from './schemas.js';
+
+export { ApiError, NotImplementedError } from './errors.js';
