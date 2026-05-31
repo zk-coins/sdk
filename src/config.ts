@@ -10,10 +10,10 @@
  */
 
 /**
- * Inline fallback for the node URL when neither the explicit
- * `apiUrl` option nor the `ZKCOINS_API_URL` env var is set.
+ * The node URL the SDK uses when neither the explicit `apiUrl`
+ * option nor the `ZKCOINS_API_URL` env var is set.
  */
-export const FALLBACK_API_URL = 'https://api.zkcoins.app';
+export const API_URL = 'https://api.zkcoins.app';
 
-/** Default per-request abort timeout in milliseconds. */
-export const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/** Per-request abort timeout in milliseconds. */
+export const REQUEST_TIMEOUT_MS = 120_000;

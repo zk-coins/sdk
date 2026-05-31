@@ -21,7 +21,7 @@
 
 import type { z } from 'zod';
 
-import { DEFAULT_REQUEST_TIMEOUT_MS, FALLBACK_API_URL } from './config.js';
+import { API_URL, REQUEST_TIMEOUT_MS } from './config.js';
 import { ApiError, HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
 import {
   BalanceResponseSchema,
@@ -115,7 +115,7 @@ export class ZkCoinsClient {
     // don't shim `process`.
     const envApiUrl =
       typeof process !== 'undefined' && process.env ? process.env.ZKCOINS_API_URL : undefined;
-    const rawUrl = opts.apiUrl ?? envApiUrl ?? FALLBACK_API_URL;
+    const rawUrl = opts.apiUrl ?? envApiUrl ?? API_URL;
     if (!/^https?:\/\//.test(rawUrl)) {
       throw new Error(
         `ZkCoinsClient: invalid apiUrl ${JSON.stringify(opts.apiUrl)} — must start with http:// or https://`,
@@ -124,7 +124,7 @@ export class ZkCoinsClient {
     // Strip a trailing slash so consumers can pass either form.
     this.apiUrl = rawUrl.replace(/\/+$/, '');
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   }
 
   async mint(address: string, amount = 10_000, signal?: AbortSignal): Promise<MintResponse> {
