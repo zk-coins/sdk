@@ -2,13 +2,15 @@
 
 Pure-TypeScript wallet SDK for [zkCoins](https://zkcoins.app). One package covers BIP-39 / BIP-32 derivation, BIP-340 Schnorr signing, the typed REST client for `/api/*`, and a high-level account adapter that wallet integrators (Cake Wallet, Layerz Wallet, the in-tree web app) consume as a drop-in `InterfaceAccountBasedWallet`-style API.
 
-> Status: pre-release scaffolding. The first published version will be `0.1.0`. The implementation tasks are tracked in [the bootstrap PR](https://github.com/zk-coins/sdk/pulls).
+> Status: v0.1.0 implementation complete, awaiting first npm publish. Tracked on the `develop` branch — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the bootstrap workflow.
 
 ## Why pure TypeScript
 
 Earlier iterations of the wallet primitives were compiled to WASM from `zk-coins/app/rust/client/`. That works in the browser but creates friction for every other consumer — React Native (Layerz Wallet) struggles to bundle WASM cleanly, and Cake Wallet (Dart) cannot consume a WASM blob at all. The functions involved are all standard BIP-39 / BIP-32 / secp256k1 Schnorr / SHA-256 — every audited pure-JS library can do them. `@zkcoins/sdk` is the pure-JS replacement, so the same library runs identically in Node 22+, the browser, and React Native.
 
-Each cryptographic primitive is **cross-tested** in CI against the Rust reference (`test/cross-rust/`) for 100 randomized inputs — the SDK ships only when JS output is byte-equivalent to the Rust output, for every primitive, on every PR.
+Each cryptographic primitive is exercised by an internal **verify-roundtrip test**: the SDK produces a Schnorr signature, then re-verifies it under the derived x-only pubkey via the same `@noble/curves` library. This proves the signing → verifying loop is consistent within JS.
+
+A separate **cross-test against the Rust reference** in `zk-coins/app/rust/client/` (proving the JS output is byte-equivalent to the in-tree Rust implementation for 100 randomized inputs per primitive) is planned as a v0.1.1 follow-up — see [issue #6](https://github.com/zk-coins/sdk/issues) once tracked.
 
 ## Install
 
