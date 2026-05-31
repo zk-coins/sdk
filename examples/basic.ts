@@ -1,15 +1,15 @@
 /**
  * Minimal end-to-end usage of `@zkcoins/sdk`. Run with:
  *
- *   ZKCOINS_API_URL=https://dev-api.zkcoins.app npx tsx examples/basic.ts
+ *   ZKCOINS_API_URL=https://api.zkcoins.app npx tsx examples/basic.ts
  *
  * The example creates a brand-new account, asks the server for the
- * balance, mints some test coins (DEV has a faucet), reads the
- * post-mint balance, and prints a Schnorr-signed claim of a random
- * username. Everything is server-mediated: the SDK never reaches a
- * Bitcoin node directly, never stores anything on disk, never holds
- * state across function calls beyond the in-memory `xpriv` and
- * `numPubkeys` counter.
+ * balance, attempts a mint (rejected on Mainnet — see DFX stages
+ * below for a stage with an open faucet), reads the balance again,
+ * and prints a Schnorr-signed claim of a random username. Everything
+ * is server-mediated: the SDK never reaches a Bitcoin node directly,
+ * never stores anything on disk, never holds state across function
+ * calls beyond the in-memory `xpriv` and `numPubkeys` counter.
  *
  * The SDK does **not** ship endpoint constants. Pass the URL of the
  * zkCoins node you want to talk to via `ZKCOINS_API_URL` (any
@@ -24,9 +24,7 @@ import { generateMnemonic, ZkCoinsAccount, ApiError } from '@zkcoins/sdk';
 async function main(): Promise<void> {
   const apiUrl = process.env.ZKCOINS_API_URL;
   if (!apiUrl) {
-    throw new Error(
-      'ZKCOINS_API_URL must be set (e.g. https://dev-api.zkcoins.app for the DEV stage).',
-    );
+    throw new Error('ZKCOINS_API_URL must be set (e.g. https://api.zkcoins.app for Mainnet).');
   }
 
   // 1. Generate a fresh BIP-39 mnemonic + derive the account.

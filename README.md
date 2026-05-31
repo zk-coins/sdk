@@ -27,7 +27,7 @@ import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 //    constants — pass the URL of the node you want to talk to.
 const mnemonic = await generateMnemonic();
 const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-  apiUrl: 'https://dev-api.zkcoins.app',
+  apiUrl: 'https://api.zkcoins.app',
 });
 
 // 2. Read authoritative state from the server.
