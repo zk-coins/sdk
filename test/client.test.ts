@@ -72,30 +72,6 @@ describe('ZkCoinsClient constructor', () => {
     expect(client.apiUrl).toBe('https://custom.test'); // trailing slash stripped
   });
 
-  it('reads ZKCOINS_API_URL env var when no apiUrl option is passed', () => {
-    const orig = process.env.ZKCOINS_API_URL;
-    process.env.ZKCOINS_API_URL = 'https://from-env.test/';
-    try {
-      const client = new ZkCoinsClient();
-      expect(client.apiUrl).toBe('https://from-env.test');
-    } finally {
-      if (orig === undefined) delete process.env.ZKCOINS_API_URL;
-      else process.env.ZKCOINS_API_URL = orig;
-    }
-  });
-
-  it('explicit option wins over env var', () => {
-    const orig = process.env.ZKCOINS_API_URL;
-    process.env.ZKCOINS_API_URL = 'https://from-env.test';
-    try {
-      const client = new ZkCoinsClient({ apiUrl: 'https://from-option.test' });
-      expect(client.apiUrl).toBe('https://from-option.test');
-    } finally {
-      if (orig === undefined) delete process.env.ZKCOINS_API_URL;
-      else process.env.ZKCOINS_API_URL = orig;
-    }
-  });
-
   it('strips a trailing slash from apiUrl', async () => {
     let observed = '';
     server.use(

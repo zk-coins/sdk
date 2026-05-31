@@ -84,11 +84,12 @@ export interface HistoryOpts {
 /** Options for `new ZkCoinsClient({...})`. */
 export interface ZkCoinsClientOptions {
   /**
-   * Base URL of the zkCoins node (no trailing slash). Resolution
-   * order:
-   *   1. this option (programmatic override)
-   *   2. `ZKCOINS_API_URL` env var (Node / Bun / RN-with-Expo)
-   *   3. `https://api.zkcoins.app` (zero-config fallback)
+   * Base URL of the zkCoins node (no trailing slash). Falls back to
+   * the `API_URL` constant in `./config.ts` when unset.
+   *
+   * Where you source this value — env var, config file, hardcoded —
+   * is the integrating app's concern, not the SDK's. The SDK is
+   * environment-agnostic; pass the URL explicitly when overriding.
    */
   apiUrl?: string;
   /** Override the global `fetch` (e.g. for testing or RN polyfills). */
@@ -110,12 +111,7 @@ export class ZkCoinsClient {
   private readonly requestTimeoutMs: number;
 
   constructor(opts: ZkCoinsClientOptions = {}) {
-    // Resolution order: explicit option > env var > inline fallback.
-    // `process.env` is guarded so the SDK loads in browsers that
-    // don't shim `process`.
-    const envApiUrl =
-      typeof process !== 'undefined' && process.env ? process.env.ZKCOINS_API_URL : undefined;
-    const rawUrl = opts.apiUrl ?? envApiUrl ?? API_URL;
+    const rawUrl = opts.apiUrl ?? API_URL;
     if (!/^https?:\/\//.test(rawUrl)) {
       throw new Error(
         `ZkCoinsClient: invalid apiUrl ${JSON.stringify(opts.apiUrl)} — must start with http:// or https://`,

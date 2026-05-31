@@ -23,9 +23,9 @@ npm install @zkcoins/sdk
 ```ts
 import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 
-// 1. Create or restore an account. Node URL comes from
-//    process.env.ZKCOINS_API_URL — or the inline fallback if unset.
-//    See "Choosing a node" for how to override.
+// 1. Create or restore an account. With no `apiUrl` passed the SDK
+//    talks to `https://api.zkcoins.app`; pass `{ apiUrl: '...' }`
+//    to point at any other node — see "Choosing a node" below.
 const mnemonic = await generateMnemonic();
 const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
 
@@ -40,13 +40,19 @@ console.warn('proof id:', result.proofId);
 
 ## Choosing a node
 
-`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The node URL is resolved in this order:
+`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The constructor parameter is how you tell the SDK which node to talk to:
 
-1. **Explicit option** — `ZkCoinsAccount.fromMnemonic(mnemonic, 0, { apiUrl: '…' })` or `new ZkCoinsClient({ apiUrl: '…' })`. Highest precedence.
-2. **`ZKCOINS_API_URL` env var** — set it once, every SDK call in that process picks it up.
-3. **Inline fallback** — `https://api.zkcoins.app` if neither of the above is set.
+```ts
+new ZkCoinsClient({ apiUrl: 'https://...' });
+ZkCoinsAccount.fromMnemonic(mnemonic, 0, { apiUrl: 'https://...' });
+```
 
-The fallback exists so the zero-config path runs; it is **not** a recommendation about which operator to use.
+When `apiUrl` is omitted, the SDK falls back to `https://api.zkcoins.app`. The SDK does **not** read environment variables, config files, or any other ambient state — where you source the URL from (env, config-file, hardcoded, CLI arg) is your app's concern. Example with env in your own code:
+
+```ts
+const client = new ZkCoinsClient({ apiUrl: process.env.ZKCOINS_API_URL });
+// `process.env.ZKCOINS_API_URL` is `undefined` → SDK uses its fallback
+```
 
 [zkcoins.app](https://zkcoins.app) is one such operator (one of hopefully many). It runs two public stages today:
 

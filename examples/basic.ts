@@ -2,7 +2,9 @@
  * Minimal end-to-end usage of `@zkcoins/sdk`. Run with:
  *
  *   npx tsx examples/basic.ts                    # uses the fallback URL
- *   ZKCOINS_API_URL=https://… npx tsx examples/basic.ts   # override
+ *
+ *   # Override — your code reads from wherever (env, config, …):
+ *   ZKCOINS_API_URL=https://… npx tsx examples/basic.ts
  *
  * The example creates a brand-new account, asks the server for the
  * balance, attempts a mint (rejected on Mainnet — see the stages
@@ -12,11 +14,10 @@
  * never stores anything on disk, never holds state across function
  * calls beyond the in-memory `xpriv` and `numPubkeys` counter.
  *
- * Node URL resolution order (handled inside the SDK, no boilerplate
- * needed in user code):
- *   1. explicit `{ apiUrl }` option (programmatic override)
- *   2. `ZKCOINS_API_URL` env var
- *   3. inline fallback
+ * `apiUrl` is passed via the constructor option. When unset, the SDK
+ * falls back to `https://api.zkcoins.app`. The SDK itself does not
+ * read environment variables — this example reads
+ * `process.env.ZKCOINS_API_URL` in user code and passes it through.
  *
  * zkcoins.app — one of hopefully many service providers — runs two
  * public stages today:
@@ -29,13 +30,18 @@ import { generateMnemonic, ZkCoinsAccount, ApiError } from '@zkcoins/sdk';
 
 async function main(): Promise<void> {
   // 1. Generate a fresh BIP-39 mnemonic + derive the account.
-  //    No `apiUrl` needed here — the SDK reads ZKCOINS_API_URL from
-  //    the environment, falling back to its inline default.
+  //    Read env in *this* code, not in the SDK — pass through as
+  //    option. `undefined` triggers the SDK's built-in fallback.
   const mnemonic = await generateMnemonic();
   // eslint-disable-next-line no-console
   console.log('mnemonic:', mnemonic);
 
-  const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
+  const apiUrl = process.env.ZKCOINS_API_URL;
+  const account = await ZkCoinsAccount.fromMnemonic(
+    mnemonic,
+    /* accountIndex */ 0,
+    apiUrl ? { apiUrl } : {},
+  );
   // eslint-disable-next-line no-console
   console.log('address: ', account.address);
 
