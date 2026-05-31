@@ -1,0 +1,56 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:00'
+      timezone: Europe/Zurich
+    open-pull-requests-limit: 5
+    target-branch: staging
+    commit-message:
+      prefix: chore(deps)
+      include: scope
+    groups:
+      noble-scure:
+        patterns:
+          - '@noble/*'
+          - '@scure/*'
+      typescript-tooling:
+        patterns:
+          - typescript
+          - tsup
+          - '@types/*'
+      eslint-prettier:
+        patterns:
+          - eslint
+          - eslint-*
+          - prettier
+          - '@typescript-eslint/*'
+      vitest:
+        patterns:
+          - vitest
+          - '@vitest/*'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:00'
+      timezone: Europe/Zurich
+    target-branch: staging
+    commit-message:
+      prefix: chore(actions)
+
+  - package-ecosystem: cargo
+    directory: /test/cross-rust/shim
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:00'
+      timezone: Europe/Zurich
+    target-branch: staging
+    commit-message:
+      prefix: chore(deps-cross)

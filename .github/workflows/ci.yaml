@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, staging, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-build:
+    name: Lint, Typecheck, Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: ESLint + Prettier
+        run: npm run lint
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Build (tsup ESM + CJS + .d.ts)
+        run: npm run build
+
+      - name: Confirm dist exists
+        run: |
+          test -f dist/index.js
+          test -f dist/index.cjs
+          test -f dist/index.d.ts
+
+  test:
+    name: Unit Tests + Coverage
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Vitest with 100% coverage gate
+        run: npm run test:coverage
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          retention-days: 7
+
+  cross-tests:
+    name: Cross-tests (JS ↔ Rust reference)
+    needs: lint-and-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if shim exists
+        id: shim
+        run: |
+          if [ -f test/cross-rust/shim/Cargo.toml ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "::notice::Cross-test shim not yet present (test/cross-rust/shim/Cargo.toml missing). Skipping. Lands in a follow-up commit on the bootstrap PR."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.shim.outputs.exists == 'true'
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.shim.outputs.exists == 'true'
+
+      - name: Cache Cargo registry + shim build
+        if: steps.shim.outputs.exists == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            test/cross-rust/shim/target
+          key: cross-shim-${{ runner.os }}-${{ hashFiles('test/cross-rust/shim/Cargo.toml') }}
+
+      - if: steps.shim.outputs.exists == 'true'
+        run: npm ci
+
+      - name: Build Rust shim
+        if: steps.shim.outputs.exists == 'true'
+        working-directory: test/cross-rust/shim
+        run: cargo build --release
+
+      - name: Run cross-tests
+        if: steps.shim.outputs.exists == 'true'
+        run: npm run test:cross

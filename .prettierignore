@@ -1,0 +1,6 @@
+dist/
+node_modules/
+coverage/
+test/cross-rust/shim/target/
+test/cross-rust/shim/Cargo.lock
+*.lock

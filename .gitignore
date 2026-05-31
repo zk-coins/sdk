@@ -1,0 +1,39 @@
+# Build output
+dist/
+*.tsbuildinfo
+
+# Coverage reports
+coverage/
+.nyc_output/
+
+# Dependencies
+node_modules/
+
+# Cross-test Rust shim
+test/cross-rust/shim/target/
+test/cross-rust/shim/Cargo.lock
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Generated docs (none today, future-proofing)
+docs/api/

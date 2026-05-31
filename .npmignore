@@ -1,0 +1,16 @@
+src/
+test/
+examples/
+.github/
+.eslintrc.cjs
+.prettierrc
+.prettierignore
+.nvmrc
+.gitignore
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+vitest.cross.config.ts
+CONTRIBUTING.md
+coverage/
+*.tsbuildinfo
