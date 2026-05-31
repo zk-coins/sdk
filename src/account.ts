@@ -53,10 +53,11 @@ import { signSchnorr } from './signing.js';
 
 export interface ZkCoinsAccountOptions {
   /**
-   * Base URL of the zkCoins node. Falls back to `FALLBACK_API_URL`
-   * from `./config.ts` when unset. Override to use a self-hosted
-   * node, an alternative service provider, or zkcoins.app's DEV
-   * stage.
+   * Base URL of the zkCoins node. Resolution order (handled inside
+   * `ZkCoinsClient`):
+   *   1. this option (programmatic override)
+   *   2. `ZKCOINS_API_URL` env var
+   *   3. `API_URL` constant in `./config.ts`
    *
    * Ignored when `client` is also passed (the override's `apiUrl`
    * wins). Both options exist so simple call sites pass `apiUrl` and
@@ -124,8 +125,8 @@ export class ZkCoinsAccount {
 
     const keys = await generateAccountKeysFromMnemonic(mnemonic, opts.passphrase ?? '');
     // Pass `apiUrl` only when set so `exactOptionalPropertyTypes` is
-    // satisfied; ZkCoinsClient falls back to FALLBACK_API_URL when the
-    // option is absent.
+    // satisfied; ZkCoinsClient runs its own resolution (option → env →
+    // config) when the option is absent.
     const client = opts.client ?? new ZkCoinsClient(opts.apiUrl ? { apiUrl: opts.apiUrl } : {});
 
     return new ZkCoinsAccount({
