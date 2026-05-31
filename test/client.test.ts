@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
+import { API_URL } from '../src/config.js';
 import { ApiError, NotImplementedError } from '../src/errors.js';
 import { ZkCoinsClient } from '../src/client.js';
 
@@ -24,7 +25,7 @@ describe('ZkCoinsClient constructor', () => {
     expect(() => new ZkCoinsClient({ apiUrl: '' })).toThrow();
   });
 
-  it('falls back to api.zkcoins.app when no apiUrl is passed', async () => {
+  it('falls back to the configured API_URL when no apiUrl is passed', async () => {
     const seen: string[] = [];
     const client = new ZkCoinsClient({
       fetch: async (input) => {
@@ -37,9 +38,9 @@ describe('ZkCoinsClient constructor', () => {
         });
       },
     });
-    expect(client.apiUrl).toBe('https://api.zkcoins.app');
+    expect(client.apiUrl).toBe(API_URL);
     await client.info();
-    expect(seen[0]).toBe('https://api.zkcoins.app/api/info');
+    expect(seen[0]).toBe(`${API_URL}/api/info`);
   });
 
   it('also falls back when constructed with no options at all', async () => {
@@ -58,9 +59,9 @@ describe('ZkCoinsClient constructor', () => {
     };
     try {
       const client = new ZkCoinsClient();
-      expect(client.apiUrl).toBe('https://api.zkcoins.app');
+      expect(client.apiUrl).toBe(API_URL);
       await client.info();
-      expect(seen[0]).toBe('https://api.zkcoins.app/api/info');
+      expect(seen[0]).toBe(`${API_URL}/api/info`);
     } finally {
       globalThis.fetch = origFetch;
     }
