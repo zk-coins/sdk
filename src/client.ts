@@ -21,6 +21,7 @@
 
 import type { z } from 'zod';
 
+import { API_URL, REQUEST_TIMEOUT_MS } from './config.js';
 import { ApiError, HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
 import {
   BalanceResponseSchema,
@@ -39,8 +40,6 @@ import {
   type ResolveUsernameResponse,
   type SendResponse,
 } from './schemas.js';
-
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 
 /** Inputs to `POST /api/send` *before* signing. */
 export interface SendRequest {
@@ -84,8 +83,15 @@ export interface HistoryOpts {
 
 /** Options for `new ZkCoinsClient({...})`. */
 export interface ZkCoinsClientOptions {
-  /** Base URL of the zkCoins node (no trailing slash). */
-  apiUrl: string;
+  /**
+   * Base URL of the zkCoins node (no trailing slash). Falls back to
+   * the `API_URL` constant in `./config.ts` when unset.
+   *
+   * Where you source this value — env var, config file, hardcoded —
+   * is the integrating app's concern, not the SDK's. The SDK is
+   * environment-agnostic; pass the URL explicitly when overriding.
+   */
+  apiUrl?: string;
   /** Override the global `fetch` (e.g. for testing or RN polyfills). */
   fetch?: typeof globalThis.fetch;
   /** Per-request abort timeout in ms. Default 120_000 (2 min). */
@@ -93,20 +99,28 @@ export interface ZkCoinsClientOptions {
 }
 
 export class ZkCoinsClient {
-  private readonly apiUrl: string;
+  /**
+   * The fully-qualified base URL this client talks to, after option
+   * resolution (caller's `apiUrl` or the internal fallback) and
+   * trailing-slash normalization. Exposed read-only so integrators
+   * and tests can introspect the effective endpoint without
+   * reaching into private state or re-deriving from options.
+   */
+  public readonly apiUrl: string;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
 
-  constructor(opts: ZkCoinsClientOptions) {
-    if (!opts.apiUrl || !/^https?:\/\//.test(opts.apiUrl)) {
+  constructor(opts: ZkCoinsClientOptions = {}) {
+    const rawUrl = opts.apiUrl ?? API_URL;
+    if (!/^https?:\/\//.test(rawUrl)) {
       throw new Error(
         `ZkCoinsClient: invalid apiUrl ${JSON.stringify(opts.apiUrl)} — must start with http:// or https://`,
       );
     }
     // Strip a trailing slash so consumers can pass either form.
-    this.apiUrl = opts.apiUrl.replace(/\/+$/, '');
+    this.apiUrl = rawUrl.replace(/\/+$/, '');
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   }
 
   async mint(address: string, amount = 10_000, signal?: AbortSignal): Promise<MintResponse> {

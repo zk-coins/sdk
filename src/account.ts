@@ -52,8 +52,18 @@ import type {
 import { signSchnorr } from './signing.js';
 
 export interface ZkCoinsAccountOptions {
-  /** Base URL of the zkCoins node (e.g. `ZKCOINS_ENDPOINTS.mainnet.apiUrl`). */
-  apiUrl: string;
+  /**
+   * Base URL of the zkCoins node. Resolution order (handled inside
+   * `ZkCoinsClient`):
+   *   1. this option (programmatic override)
+   *   2. `ZKCOINS_API_URL` env var
+   *   3. `API_URL` constant in `./config.ts`
+   *
+   * Ignored when `client` is also passed (the override's `apiUrl`
+   * wins). Both options exist so simple call sites pass `apiUrl` and
+   * test/advanced call sites can inject a pre-built `ZkCoinsClient`.
+   */
+  apiUrl?: string;
   /** Optional BIP-39 passphrase (advanced; leave empty for the default flow). */
   passphrase?: string;
   /** Optional `ZkCoinsClient` override — primarily for tests. */
@@ -101,7 +111,7 @@ export class ZkCoinsAccount {
   static async fromMnemonic(
     mnemonic: string,
     accountIndex: number,
-    opts: ZkCoinsAccountOptions,
+    opts: ZkCoinsAccountOptions = {},
   ): Promise<ZkCoinsAccount> {
     // Today the derivation does not branch on accountIndex; future
     // multi-account support would extend the BIP-32 path here. The
@@ -114,7 +124,10 @@ export class ZkCoinsAccount {
     }
 
     const keys = await generateAccountKeysFromMnemonic(mnemonic, opts.passphrase ?? '');
-    const client = opts.client ?? new ZkCoinsClient({ apiUrl: opts.apiUrl });
+    // Pass `apiUrl` only when set so `exactOptionalPropertyTypes` is
+    // satisfied; ZkCoinsClient runs its own resolution (option → env →
+    // config) when the option is absent.
+    const client = opts.client ?? new ZkCoinsClient(opts.apiUrl ? { apiUrl: opts.apiUrl } : {});
 
     return new ZkCoinsAccount({
       address: keys.address,

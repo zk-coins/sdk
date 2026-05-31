@@ -23,12 +23,11 @@ npm install @zkcoins/sdk
 ```ts
 import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 
-// 1. Create or restore an account. The SDK does not ship endpoint
-//    constants — pass the URL of the node you want to talk to.
+// 1. Create or restore an account. With no `apiUrl` passed the SDK
+//    talks to `https://api.zkcoins.app`; pass `{ apiUrl: '...' }`
+//    to point at any other node — see "Choosing a node" below.
 const mnemonic = await generateMnemonic();
-const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-  apiUrl: 'https://dev-api.zkcoins.app',
-});
+const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
 
 // 2. Read authoritative state from the server.
 const { balance, username } = await account.getBalance();
@@ -41,9 +40,21 @@ console.warn('proof id:', result.proofId);
 
 ## Choosing a node
 
-`@zkcoins/sdk` is a **protocol SDK**, not a service SDK — it has no built-in knowledge of any particular operator. The `apiUrl` you pass to `ZkCoinsAccount.fromMnemonic` or `new ZkCoinsClient({ apiUrl })` is the only thing that determines which node the wallet talks to.
+`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The constructor parameter is how you tell the SDK which node to talk to:
 
-DFX operates two public stages today:
+```ts
+new ZkCoinsClient({ apiUrl: 'https://...' });
+ZkCoinsAccount.fromMnemonic(mnemonic, 0, { apiUrl: 'https://...' });
+```
+
+When `apiUrl` is omitted, the SDK falls back to `https://api.zkcoins.app`. The SDK does **not** read environment variables, config files, or any other ambient state — where you source the URL from (env, config-file, hardcoded, CLI arg) is your app's concern. Example with env in your own code:
+
+```ts
+const client = new ZkCoinsClient({ apiUrl: process.env.ZKCOINS_API_URL });
+// `process.env.ZKCOINS_API_URL` is `undefined` → SDK uses its fallback
+```
+
+[zkcoins.app](https://zkcoins.app) is one such operator (one of hopefully many). It runs two public stages today:
 
 | URL                           | Bitcoin network | Notes                                                        |
 | ----------------------------- | --------------- | ------------------------------------------------------------ |
@@ -61,16 +72,20 @@ class ZkCoinsAccount {
   static fromMnemonic(
     mnemonic: string,
     accountIndex: number,
-    opts: { apiUrl: string; passphrase?: string },
+    opts?: { apiUrl?: string; passphrase?: string },
   ): Promise<ZkCoinsAccount>;
 
   readonly address: string;
+  readonly client: ZkCoinsClient;
 
   getBalance(): Promise<{ balance: number; username?: string }>;
-  pay(recipient: string, amountSats: number): Promise<{ txid?: string; proofId: number }>;
-  getTransactions(opts?: HistoryOpts): Promise<TxItem[]>; // throws until /api/history lands
-  claimUsername(username: string): Promise<void>;
-  resolveUsername(username: string): Promise<{ address: string }>;
+  pay(recipient: string, amountSats: number): Promise<PayResult>;
+  getTransactions(opts?: HistoryOpts): Promise<HistoryResponse>; // throws until /api/history lands
+  claimUsername(username: string): Promise<UsernameResponse>;
+  resolveUsername(username: string): Promise<UsernameResponse>;
+
+  getNumPubkeys(): number;
+  setNumPubkeys(value: number): void;
 }
 ```
 

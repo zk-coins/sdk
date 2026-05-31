@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
+import { API_URL } from '../src/config.js';
 import { ApiError, NotImplementedError } from '../src/errors.js';
 import { ZkCoinsClient } from '../src/client.js';
 
@@ -22,6 +23,53 @@ describe('ZkCoinsClient constructor', () => {
 
   it('rejects an empty apiUrl', () => {
     expect(() => new ZkCoinsClient({ apiUrl: '' })).toThrow();
+  });
+
+  it('falls back to the configured API_URL when no apiUrl is passed', async () => {
+    const seen: string[] = [];
+    const client = new ZkCoinsClient({
+      fetch: async (input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        seen.push(url);
+        return new Response(JSON.stringify({ network: 'Mainnet' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    expect(client.apiUrl).toBe(API_URL);
+    await client.info();
+    expect(seen[0]).toBe(`${API_URL}/api/info`);
+  });
+
+  it('also falls back when constructed with no options at all', async () => {
+    // Pins the zero-arg form `new ZkCoinsClient()` as a supported
+    // call shape — a regression that made `apiUrl` required again
+    // would surface here.
+    const origFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = async (input) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      seen.push(url);
+      return new Response(JSON.stringify({ network: 'Mainnet' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    try {
+      const client = new ZkCoinsClient();
+      expect(client.apiUrl).toBe(API_URL);
+      await client.info();
+      expect(seen[0]).toBe(`${API_URL}/api/info`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('exposes the resolved apiUrl as a readonly instance property', () => {
+    const client = new ZkCoinsClient({ apiUrl: 'https://custom.test/' });
+    expect(client.apiUrl).toBe('https://custom.test'); // trailing slash stripped
   });
 
   it('strips a trailing slash from apiUrl', async () => {
