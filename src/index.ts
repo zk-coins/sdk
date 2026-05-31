@@ -65,3 +65,10 @@ export type {
   SignedClaimRequest,
   HistoryOpts,
 } from './client.js';
+
+export { ZkCoinsAccount } from './account.js';
+export type {
+  ZkCoinsAccountOptions,
+  PayResult,
+  HistoryOpts as AccountHistoryOpts,
+} from './account.js';
