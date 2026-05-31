@@ -42,6 +42,15 @@ export class ApiError extends Error {
 }
 
 /**
+ * Tracking URL for the `/api/history` endpoint pending in
+ * `zk-coins/node`. Centralised here so the throw sites in
+ * `client.ts::history()` and `account.ts::getTransactions()` share
+ * a single source of truth — and the URL changes in one place if
+ * the issue ever migrates.
+ */
+export const HISTORY_TRACKING_URL = 'https://github.com/zk-coins/node/issues/153';
+
+/**
  * Thrown when an SDK method is called against a server-side endpoint
  * that has not shipped yet. Today: `ZkCoinsClient.history(...)` and
  * `ZkCoinsAccount.getTransactions(...)` while zk-coins/node #153 is

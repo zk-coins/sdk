@@ -21,12 +21,13 @@ npm install @zkcoins/sdk
 ## Quick start
 
 ```ts
-import { ZkCoinsAccount, ZKCOINS_ENDPOINTS, generateMnemonic } from '@zkcoins/sdk';
+import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 
-// 1. Create or restore an account.
+// 1. Create or restore an account. The SDK does not ship endpoint
+//    constants — pass the URL of the node you want to talk to.
 const mnemonic = await generateMnemonic();
 const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-  apiUrl: ZKCOINS_ENDPOINTS.mutinynet.apiUrl, // 'https://dev-api.zkcoins.app'
+  apiUrl: 'https://dev-api.zkcoins.app',
 });
 
 // 2. Read authoritative state from the server.
@@ -38,14 +39,18 @@ const result = await account.pay(/* recipient */ recipientHex, /* amountSats */ 
 console.warn('proof id:', result.proofId);
 ```
 
-## Endpoints
+## Choosing a node
 
-```ts
-ZKCOINS_ENDPOINTS.mainnet; // api.zkcoins.app, backed by Bitcoin Mainnet
-ZKCOINS_ENDPOINTS.mutinynet; // dev-api.zkcoins.app, backed by Mutinynet (Signet)
-```
+`@zkcoins/sdk` is a **protocol SDK**, not a service SDK — it has no built-in knowledge of any particular operator. The `apiUrl` you pass to `ZkCoinsAccount.fromMnemonic` or `new ZkCoinsClient({ apiUrl })` is the only thing that determines which node the wallet talks to.
 
-The mapping reflects the live deploy: `api.zkcoins.app` runs against Bitcoin Mainnet (`electrs-mainnet` + `IS_MAINNET=true`), `dev-api.zkcoins.app` runs against Mutinynet (`electrs-mutinynet` + `IS_MAINNET=false`). Self-hosters pass their own `apiUrl` directly.
+DFX operates two public stages today:
+
+| URL                           | Bitcoin network | Notes                                                        |
+| ----------------------------- | --------------- | ------------------------------------------------------------ |
+| `https://api.zkcoins.app`     | Mainnet         | Production. No faucet — mint requires real on-chain funding. |
+| `https://dev-api.zkcoins.app` | Mutinynet       | DEV. Open mint faucet, signet-grade reorgs, no real value.   |
+
+Self-hosters point `apiUrl` at their own node (`zk-coins/node` docker image, see [zk-coins/node README](https://github.com/zk-coins/node)). Wallet integrators typically expose a chooser in their own config; the SDK stays opinion-free on which node is "the right one".
 
 ## API surface (preview)
 

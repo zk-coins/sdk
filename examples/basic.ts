@@ -1,8 +1,7 @@
 /**
- * Minimal end-to-end usage of `@zkcoins/sdk` against the live DEV
- * stage (`dev-api.zkcoins.app`, backed by Mutinynet). Run with:
+ * Minimal end-to-end usage of `@zkcoins/sdk`. Run with:
  *
- *   npx tsx examples/basic.ts
+ *   ZKCOINS_API_URL=https://dev-api.zkcoins.app npx tsx examples/basic.ts
  *
  * The example creates a brand-new account, asks the server for the
  * balance, mints some test coins (DEV has a faucet), reads the
@@ -12,20 +11,31 @@
  * state across function calls beyond the in-memory `xpriv` and
  * `numPubkeys` counter.
  *
- * Replace `ZKCOINS_ENDPOINTS.mutinynet` with `ZKCOINS_ENDPOINTS.mainnet`
- * (and provide a funded account) to exercise the Mainnet path.
+ * The SDK does **not** ship endpoint constants. Pass the URL of the
+ * zkCoins node you want to talk to via `ZKCOINS_API_URL` (any
+ * self-hosted node works too). The DFX-operated stages are:
+ *
+ *   - `https://api.zkcoins.app`     (Bitcoin Mainnet)
+ *   - `https://dev-api.zkcoins.app` (Mutinynet — has the open faucet)
  */
 
-import { generateMnemonic, ZkCoinsAccount, ZKCOINS_ENDPOINTS, ApiError } from '@zkcoins/sdk';
+import { generateMnemonic, ZkCoinsAccount, ApiError } from '@zkcoins/sdk';
 
 async function main(): Promise<void> {
+  const apiUrl = process.env.ZKCOINS_API_URL;
+  if (!apiUrl) {
+    throw new Error(
+      'ZKCOINS_API_URL must be set (e.g. https://dev-api.zkcoins.app for the DEV stage).',
+    );
+  }
+
   // 1. Generate a fresh BIP-39 mnemonic + derive the account.
   const mnemonic = await generateMnemonic();
   // eslint-disable-next-line no-console
   console.log('mnemonic:', mnemonic);
 
   const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0, {
-    apiUrl: ZKCOINS_ENDPOINTS.mutinynet.apiUrl,
+    apiUrl,
   });
   // eslint-disable-next-line no-console
   console.log('address: ', account.address);

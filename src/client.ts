@@ -21,7 +21,7 @@
 
 import type { z } from 'zod';
 
-import { ApiError, NotImplementedError } from './errors.js';
+import { ApiError, HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
 import {
   BalanceResponseSchema,
   ClaimUsernameResponseSchema,
@@ -41,8 +41,6 @@ import {
 } from './schemas.js';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
-
-const HISTORY_ISSUE_URL = 'https://github.com/zk-coins/node/issues/153';
 
 /** Inputs to `POST /api/send` *before* signing. */
 export interface SendRequest {
@@ -169,7 +167,7 @@ export class ZkCoinsClient {
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- args reserved for the future signature
   async history(_address: string, _opts: HistoryOpts = {}): Promise<HistoryResponse> {
-    throw new NotImplementedError('ZkCoinsClient.history', HISTORY_ISSUE_URL);
+    throw new NotImplementedError('ZkCoinsClient.history', HISTORY_TRACKING_URL);
   }
 
   /**

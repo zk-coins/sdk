@@ -40,7 +40,7 @@ import {
   deriveSigningKey,
   generateAccountKeysFromMnemonic,
 } from './derivation.js';
-import { NotImplementedError } from './errors.js';
+import { HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
 import { buildClaimMessage, buildSendMessage } from './messages.js';
 import type {
   BalanceResponse,
@@ -50,8 +50,6 @@ import type {
   UsernameResponse,
 } from './schemas.js';
 import { signSchnorr } from './signing.js';
-
-const HISTORY_ISSUE_URL = 'https://github.com/zk-coins/node/issues/153';
 
 export interface ZkCoinsAccountOptions {
   /** Base URL of the zkCoins node (e.g. `ZKCOINS_ENDPOINTS.mainnet.apiUrl`). */
@@ -202,7 +200,7 @@ export class ZkCoinsAccount {
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- args reserved for the future signature
   async getTransactions(_opts: HistoryOpts = {}): Promise<HistoryResponse> {
-    throw new NotImplementedError('ZkCoinsAccount.getTransactions', HISTORY_ISSUE_URL);
+    throw new NotImplementedError('ZkCoinsAccount.getTransactions', HISTORY_TRACKING_URL);
   }
 
   /**

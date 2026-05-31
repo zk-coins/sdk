@@ -53,9 +53,6 @@ export type {
 
 export { ApiError, NotImplementedError } from './errors.js';
 
-export { ZKCOINS_ENDPOINTS } from './networks.js';
-export type { ZkCoinsEndpoint } from './networks.js';
-
 export { ZkCoinsClient } from './client.js';
 export type {
   ZkCoinsClientOptions,
