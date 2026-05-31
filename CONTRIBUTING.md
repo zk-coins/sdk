@@ -70,6 +70,34 @@ Longer body explaining WHY, not WHAT — the diff already shows what.
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `ci`, `build`, `perf`.
 
+## Releasing
+
+Releases are gated by `npm version` plus the auto-release-pr workflow. The version field in `package.json` is the single source of truth — `src/version.ts` is regenerated from it by `scripts/sync-version.cjs` (wired in as the `version` lifecycle hook in `package.json#scripts`). Hand-editing the version field anywhere is unnecessary and surfaced loudly by `test/version.test.ts` if attempted.
+
+End-to-end flow for a release:
+
+```bash
+# On develop, with all feature work merged and committed.
+npm version patch   # or minor / major
+# ↑ This bumps package.json, runs sync-version.cjs (which updates
+#   src/version.ts and stages it), creates a single "v0.1.2" commit
+#   with both files, and creates a local tag v0.1.2.
+
+git push origin develop
+# ↑ Pushes the bump commit. The auto-release-pr workflow opens
+#   (or updates) "Release: develop -> main" with the bump diff
+#   included. Review and merge as a maintainer.
+
+git push origin v0.1.2
+# ↑ Pushes the tag. publish.yaml triggers, runs the full
+#   pre-publish gate again, and `npm publish --provenance` ships
+#   @zkcoins/sdk@0.1.2 to npm with OIDC provenance attestation.
+```
+
+The tag push is the "send it" step — gated by the maintainer's explicit action after the release PR has merged to `main`. Never push the tag before the merge: publish would ship from a develop-only commit before the main branch has caught up.
+
+If the auto-release-pr workflow fails or you need to amend mid-release: don't force-push the tag (npm publish would reject the same version anyway). Bump again (`npm version patch` produces v0.1.3) and start over — versions are cheap, history is forever.
+
 ## Issues
 
 For bugs: include the SDK version (`@zkcoins/sdk@X.Y.Z`), the runtime (Node version / browser / RN), a minimal reproduction, and the actual vs expected output. For features: link the consumer use case (a wallet integration, an example, an issue in `zk-coins/node` etc.) — the SDK does not add features speculatively.
