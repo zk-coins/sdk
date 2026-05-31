@@ -10,4 +10,4 @@
  * Kept in sync by the release process (the version bump touches both
  * `package.json` and this file as part of the same commit).
  */
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
