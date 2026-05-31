@@ -4,8 +4,8 @@
  *   ZKCOINS_API_URL=https://api.zkcoins.app npx tsx examples/basic.ts
  *
  * The example creates a brand-new account, asks the server for the
- * balance, attempts a mint (rejected on Mainnet — see DFX stages
- * below for a stage with an open faucet), reads the balance again,
+ * balance, attempts a mint (rejected on Mainnet — see the stages
+ * listed below for one with an open faucet), reads the balance again,
  * and prints a Schnorr-signed claim of a random username. Everything
  * is server-mediated: the SDK never reaches a Bitcoin node directly,
  * never stores anything on disk, never holds state across function
