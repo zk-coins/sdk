@@ -72,16 +72,20 @@ class ZkCoinsAccount {
   static fromMnemonic(
     mnemonic: string,
     accountIndex: number,
-    opts: { apiUrl: string; passphrase?: string },
+    opts?: { apiUrl?: string; passphrase?: string },
   ): Promise<ZkCoinsAccount>;
 
   readonly address: string;
+  readonly client: ZkCoinsClient;
 
   getBalance(): Promise<{ balance: number; username?: string }>;
-  pay(recipient: string, amountSats: number): Promise<{ txid?: string; proofId: number }>;
-  getTransactions(opts?: HistoryOpts): Promise<TxItem[]>; // throws until /api/history lands
-  claimUsername(username: string): Promise<void>;
-  resolveUsername(username: string): Promise<{ address: string }>;
+  pay(recipient: string, amountSats: number): Promise<PayResult>;
+  getTransactions(opts?: HistoryOpts): Promise<HistoryResponse>; // throws until /api/history lands
+  claimUsername(username: string): Promise<UsernameResponse>;
+  resolveUsername(username: string): Promise<UsernameResponse>;
+
+  getNumPubkeys(): number;
+  setNumPubkeys(value: number): void;
 }
 ```
 
