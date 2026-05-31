@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -51,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -87,7 +87,7 @@ jobs:
             echo "::notice::Cross-test shim not yet present (test/cross-rust/shim/Cargo.toml missing). Skipping. Lands in a follow-up commit on the bootstrap PR."
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         if: steps.shim.outputs.exists == 'true'
         with:
           node-version-file: '.nvmrc'
