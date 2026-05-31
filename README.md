@@ -43,7 +43,7 @@ console.warn('proof id:', result.proofId);
 
 `@zkcoins/sdk` is a **protocol SDK**, not a service SDK — it has no built-in knowledge of any particular operator. The `apiUrl` you pass to `ZkCoinsAccount.fromMnemonic` or `new ZkCoinsClient({ apiUrl })` is the only thing that determines which node the wallet talks to.
 
-DFX operates two public stages today:
+[zkcoins.app](https://zkcoins.app) is one such operator (one of hopefully many). It runs two public stages today:
 
 | URL                           | Bitcoin network | Notes                                                        |
 | ----------------------------- | --------------- | ------------------------------------------------------------ |

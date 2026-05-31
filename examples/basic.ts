@@ -13,7 +13,8 @@
  *
  * The SDK does **not** ship endpoint constants. Pass the URL of the
  * zkCoins node you want to talk to via `ZKCOINS_API_URL` (any
- * self-hosted node works too). The DFX-operated stages are:
+ * self-hosted node works too). zkcoins.app — one of hopefully many
+ * service providers — runs two public stages today:
  *
  *   - `https://api.zkcoins.app`     (Bitcoin Mainnet)
  *   - `https://dev-api.zkcoins.app` (Mutinynet — has the open faucet)
