@@ -6,3 +6,14 @@
 // `tsup` builds into `dist/index.{js,cjs,d.ts}`.
 
 export { VERSION } from './version.js';
+
+export {
+  generateMnemonic,
+  validateMnemonic,
+  mnemonicFromEntropy,
+  generateAccountKeys,
+  generateAccountKeysFromMnemonic,
+  derivePublicKeys,
+  deriveSigningKey,
+} from './derivation.js';
+export type { AccountKeys } from './derivation.js';
