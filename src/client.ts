@@ -179,7 +179,6 @@ export class ZkCoinsClient {
    * final API today — only the underlying server endpoint is
    * missing.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- args reserved for the future signature
   async history(_address: string, _opts: HistoryOpts = {}): Promise<HistoryResponse> {
     throw new NotImplementedError('ZkCoinsClient.history', HISTORY_TRACKING_URL);
   }

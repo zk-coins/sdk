@@ -1,5 +1,10 @@
 {
   "compilerOptions": {
+    // `paths` (the `@zkcoins/sdk` self-alias used by tests) implies a
+    // `baseUrl` deep in tsup's DTS rollup pass, which TS 6 flags as a
+    // 7.0-removal deprecation. We dropped the explicit `baseUrl`; this
+    // silences the residual deprecation the DTS build still surfaces.
+    "ignoreDeprecations": "6.0",
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -20,7 +25,6 @@
     "declarationMap": true,
     "sourceMap": true,
     "resolveJsonModule": true,
-    "baseUrl": ".",
     "paths": {
       "@zkcoins/sdk": ["./src/index.ts"]
     }

@@ -56,24 +56,25 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@noble/curves": "^1.6.0",
-    "@noble/hashes": "^1.5.0",
-    "@scure/bip32": "^1.5.0",
-    "@scure/bip39": "^1.4.0",
-    "zod": "^3.23.8"
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@scure/bip32": "^2.2.0",
+    "@scure/bip39": "^2.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^22.7.0",
-    "@typescript-eslint/eslint-plugin": "^8.8.0",
-    "@typescript-eslint/parser": "^8.8.0",
-    "@vitest/coverage-v8": "^4.1.5",
-    "eslint": "^8.57.0",
-    "eslint-config-prettier": "^9.1.0",
-    "msw": "^2.4.0",
-    "prettier": "^3.4.2",
-    "tsup": "^8.3.0",
-    "typescript": "^5.7.3",
-    "vitest": "^4.1.5"
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.4.1",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
+    "msw": "^2.14.6",
+    "prettier": "^3.8.3",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.60.1",
+    "vitest": "^4.1.8"
   },
   "publishConfig": {
     "access": "public",

@@ -8,7 +8,7 @@
  * `secp.sign_schnorr_no_aux_rand(&msg, &keypair)` — BIP-340 with
  * the aux-rand argument forced to all-zeros, which makes the
  * nonce deterministic. We replicate this by passing a 32-byte
- * zero-filled `auxRand` to `@noble/curves/secp256k1::schnorr.sign`.
+ * zero-filled `auxRand` to `@noble/curves/secp256k1.js::schnorr.sign`.
  * Without this match, every signature would differ between Rust
  * and JS for the same inputs — and the cross-test would fail.
  *
@@ -17,9 +17,9 @@
  * import-path rename for consumers.
  */
 
-import { schnorr } from '@noble/curves/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
 import { deriveSigningKey, derivePublicKeys } from './derivation.js';
 

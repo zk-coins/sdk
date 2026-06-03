@@ -31,8 +31,8 @@
  * `numPubkeys` alongside the mnemonic.
  */
 
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex } from '@noble/hashes/utils';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 
 import { ZkCoinsClient, type SignedClaimRequest, type SignedSendRequest } from './client.js';
 import {
@@ -211,7 +211,6 @@ export class ZkCoinsAccount {
    * until zk-coins/node issue #153 ships.** The method signature is
    * stable; only the underlying server endpoint is missing.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- args reserved for the future signature
   async getTransactions(_opts: HistoryOpts = {}): Promise<HistoryResponse> {
     throw new NotImplementedError('ZkCoinsAccount.getTransactions', HISTORY_TRACKING_URL);
   }
