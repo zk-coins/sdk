@@ -3,8 +3,8 @@ import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
 import { API_URL } from '../src/config.js';
-import { ApiError, NotImplementedError } from '../src/errors.js';
-import { ZkCoinsClient } from '../src/client.js';
+import { ApiError } from '../src/errors.js';
+import { ZkCoinsClient, newIdempotencyKey } from '../src/client.js';
 
 const BASE = 'https://node.test';
 
@@ -15,6 +15,21 @@ afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
 const newClient = () => new ZkCoinsClient({ apiUrl: BASE });
+
+describe('newIdempotencyKey', () => {
+  it('produces a v4 UUID with the RFC-4122 version + variant nibbles', () => {
+    const re = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    for (let i = 0; i < 50; i += 1) {
+      expect(newIdempotencyKey()).toMatch(re);
+    }
+  });
+
+  it('is unique across calls', () => {
+    const a = newIdempotencyKey();
+    const b = newIdempotencyKey();
+    expect(a).not.toBe(b);
+  });
+});
 
 describe('ZkCoinsClient constructor', () => {
   it('rejects an apiUrl without a scheme', () => {
@@ -44,9 +59,6 @@ describe('ZkCoinsClient constructor', () => {
   });
 
   it('also falls back when constructed with no options at all', async () => {
-    // Pins the zero-arg form `new ZkCoinsClient()` as a supported
-    // call shape — a regression that made `apiUrl` required again
-    // would surface here.
     const origFetch = globalThis.fetch;
     const seen: string[] = [];
     globalThis.fetch = async (input) => {
@@ -69,7 +81,7 @@ describe('ZkCoinsClient constructor', () => {
 
   it('exposes the resolved apiUrl as a readonly instance property', () => {
     const client = new ZkCoinsClient({ apiUrl: 'https://custom.test/' });
-    expect(client.apiUrl).toBe('https://custom.test'); // trailing slash stripped
+    expect(client.apiUrl).toBe('https://custom.test');
   });
 
   it('strips a trailing slash from apiUrl', async () => {
@@ -92,28 +104,33 @@ describe('ZkCoinsClient.info', () => {
     const info = await newClient().info();
     expect(info.network).toBe('Mutinynet');
     expect(info.capabilities).toBeUndefined();
+    expect(info.bitcoin_network).toBeUndefined();
   });
 
-  it('parses a full info with capabilities', async () => {
+  it('parses a full info (capabilities + bitcoin_network + username_domain)', async () => {
     server.use(
       http.get(`${BASE}/api/info`, () =>
         HttpResponse.json({
           network: 'Mainnet',
-          capabilities: { address_list: true, faucet: false, usernames: true, lnurl: false },
+          bitcoin_network: 'mainnet',
+          capabilities: {
+            address_list: true,
+            username_claim: false,
+            lnurl: false,
+            multi_asset: true,
+          },
+          username_domain: 'api.zkcoins.app',
         }),
       ),
     );
     const info = await newClient().info();
-    expect(info.capabilities?.usernames).toBe(true);
+    expect(info.capabilities?.multi_asset).toBe(true);
+    expect(info.bitcoin_network).toBe('mainnet');
+    expect(info.username_domain).toBe('api.zkcoins.app');
   });
 
-  it('throws ZodError on schema-shape drift (e.g. renamed field)', async () => {
-    server.use(
-      http.get(
-        `${BASE}/api/info`,
-        () => HttpResponse.json({ chain: 'Mainnet' }), // 'chain' instead of 'network'
-      ),
-    );
+  it('throws ZodError on schema-shape drift (renamed field)', async () => {
+    server.use(http.get(`${BASE}/api/info`, () => HttpResponse.json({ chain: 'Mainnet' })));
     await expect(newClient().info()).rejects.toThrow();
   });
 });
@@ -124,59 +141,124 @@ describe('ZkCoinsClient.balance', () => {
     server.use(
       http.get(`${BASE}/api/balance`, ({ request }) => {
         observed = new URL(request.url).searchParams.get('address') ?? '';
-        return HttpResponse.json({ balance: 1000 });
+        return HttpResponse.json({ balance: 1000, num_sends: 0 });
       }),
     );
     await newClient().balance('aa bb');
     expect(observed).toBe('aa bb');
   });
 
-  it('parses balance + optional username', async () => {
+  it('parses balance + num_sends + optional username', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () =>
-        HttpResponse.json({ balance: 5000, username: 'alice' }),
+        HttpResponse.json({ balance: 5000, username: 'alice', num_sends: 4 }),
       ),
     );
     const r = await newClient().balance('abcdef');
     expect(r.balance).toBe(5000);
     expect(r.username).toBe('alice');
+    expect(r.num_sends).toBe(4);
   });
 });
 
-describe('ZkCoinsClient.mint', () => {
-  it('defaults amount to 10000 when omitted', async () => {
-    let observed: { account_address?: string; amount?: number } = {};
+describe('ZkCoinsClient.history', () => {
+  it('forwards address + limit + offset query params', async () => {
+    let params: URLSearchParams | null = null;
     server.use(
-      http.post(`${BASE}/api/mint`, async ({ request }) => {
-        observed = (await request.json()) as typeof observed;
-        return HttpResponse.json({ success: true, proof_id: 1 });
+      http.get(`${BASE}/api/history`, ({ request }) => {
+        params = new URL(request.url).searchParams;
+        return HttpResponse.json({ items: [], total: 0, limit: 10, offset: 5 });
       }),
     );
-    await newClient().mint('ab');
-    expect(observed).toEqual({ account_address: 'ab', amount: 10_000 });
+    await newClient().history('abcd', { limit: 10, offset: 5 });
+    expect(params!.get('address')).toBe('abcd');
+    expect(params!.get('limit')).toBe('10');
+    expect(params!.get('offset')).toBe('5');
   });
 
-  it('passes explicit amount through', async () => {
-    let observedAmount = 0;
+  it('omits limit / offset when not supplied', async () => {
+    let params: URLSearchParams | null = null;
     server.use(
-      http.post(`${BASE}/api/mint`, async ({ request }) => {
-        const body = (await request.json()) as { amount: number };
-        observedAmount = body.amount;
-        return HttpResponse.json({ success: true });
+      http.get(`${BASE}/api/history`, ({ request }) => {
+        params = new URL(request.url).searchParams;
+        return HttpResponse.json({ items: [], total: 0, limit: 50, offset: 0 });
       }),
     );
-    await newClient().mint('ab', 42);
-    expect(observedAmount).toBe(42);
+    await newClient().history('abcd');
+    expect(params!.has('limit')).toBe(false);
+    expect(params!.has('offset')).toBe(false);
+  });
+
+  it('parses a populated page', async () => {
+    server.use(
+      http.get(`${BASE}/api/history`, () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 1,
+              txid: null,
+              timestamp: 0,
+              direction: 'mint',
+              amount: 1000,
+              counterparty: null,
+              status: 'confirmed',
+              block_height: null,
+              memo: null,
+            },
+          ],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        }),
+      ),
+    );
+    const r = await newClient().history('abcd');
+    expect(r.items).toHaveLength(1);
+    expect(r.items[0]?.direction).toBe('mint');
   });
 });
 
-describe('ZkCoinsClient.send / commit / claimUsername (POST methods)', () => {
-  it('send: forwards the signed request body verbatim', async () => {
-    let observed: unknown = null;
+describe('ZkCoinsClient.mintJob', () => {
+  it('admits a mint job with the Idempotency-Key header and no asset_id', async () => {
+    let body: Record<string, unknown> = {};
+    let key = '';
     server.use(
-      http.post(`${BASE}/api/send`, async ({ request }) => {
-        observed = await request.json();
-        return HttpResponse.json({ success: true, proof_id: 99 });
+      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
+        body = (await request.json()) as typeof body;
+        key = request.headers.get('Idempotency-Key') ?? '';
+        return HttpResponse.json({ job_id: 'job-1', status: 'queued' }, { status: 202 });
+      }),
+    );
+    const r = await newClient().mintJob({ account_address: 'ab', amount: 10_000 }, 'idem-key-1');
+    expect(body).toEqual({ account_address: 'ab', amount: 10_000 });
+    expect(body).not.toHaveProperty('asset_id');
+    expect(key).toBe('idem-key-1');
+    expect(r.job_id).toBe('job-1');
+    expect(r.status).toBe('queued');
+  });
+
+  it('passes asset_id through when supplied', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
+        body = (await request.json()) as typeof body;
+        return HttpResponse.json({ job_id: 'job-2', status: 'queued' }, { status: 202 });
+      }),
+    );
+    await newClient().mintJob({ account_address: 'ab', amount: 5, asset_id: 'ff'.repeat(32) }, 'k');
+    expect(body.asset_id).toBe('ff'.repeat(32));
+  });
+});
+
+describe('ZkCoinsClient.sendJob', () => {
+  it('admits a send job with the signed body verbatim + Idempotency-Key', async () => {
+    let body: unknown = null;
+    let key = '';
+    server.use(
+      http.post(`${BASE}/api/jobs/send`, async ({ request }) => {
+        body = await request.json();
+        key = request.headers.get('Idempotency-Key') ?? '';
+        return HttpResponse.json({ job_id: 'send-1', status: 'queued' }, { status: 202 });
       }),
     );
     const req = {
@@ -188,25 +270,313 @@ describe('ZkCoinsClient.send / commit / claimUsername (POST methods)', () => {
       signature: 'ee',
       timestamp: 12345,
     };
-    const r = await newClient().send(req);
-    expect(observed).toEqual(req);
-    expect(r.proof_id).toBe(99);
+    const r = await newClient().sendJob(req, 'send-key');
+    expect(body).toEqual(req);
+    expect(key).toBe('send-key');
+    expect(r.job_id).toBe('send-1');
   });
 
-  it('commit: forwards the commit request body', async () => {
-    let observed: unknown = null;
+  it('passes asset_id through on a send', async () => {
+    let body: Record<string, unknown> = {};
     server.use(
-      http.post(`${BASE}/api/commit`, async ({ request }) => {
-        observed = await request.json();
-        return HttpResponse.json({ success: true });
+      http.post(`${BASE}/api/jobs/send`, async ({ request }) => {
+        body = (await request.json()) as typeof body;
+        return HttpResponse.json({ job_id: 'send-2', status: 'queued' }, { status: 202 });
+      }),
+    );
+    await newClient().sendJob(
+      {
+        account_address: 'aa',
+        recipient: 'bb',
+        amount: 1,
+        public_key: 'cc',
+        next_public_key: 'dd',
+        signature: 'ee',
+        timestamp: 1,
+        asset_id: 'ab'.repeat(32),
+      },
+      'k',
+    );
+    expect(body.asset_id).toBe('ab'.repeat(32));
+  });
+});
+
+describe('ZkCoinsClient.getJob / getJobWithRetry', () => {
+  it('parses the poll body and returns just the status from getJob', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/:id`, () =>
+        HttpResponse.json({
+          job_id: 'job-1',
+          kind: 'send',
+          status: 'proving',
+          phase: 'proving',
+          progress: 50,
+        }),
+      ),
+    );
+    const r = await newClient().getJob('job-1');
+    expect(r.status).toBe('proving');
+    expect(r.progress).toBe(50);
+  });
+
+  it('parses Retry-After seconds into retryAfterMs', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/:id`, () =>
+        HttpResponse.json(
+          { job_id: 'job-1', kind: 'mint', status: 'queued', phase: 'queued', progress: 0 },
+          { headers: { 'Retry-After': '2' } },
+        ),
+      ),
+    );
+    const r = await newClient().getJobWithRetry('job-1');
+    expect(r.retryAfterMs).toBe(2000);
+    expect(r.status.status).toBe('queued');
+  });
+
+  it('returns null retryAfterMs when the header is absent (terminal poll)', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/:id`, () =>
+        HttpResponse.json({
+          job_id: 'job-1',
+          kind: 'mint',
+          status: 'completed',
+          phase: 'completed',
+          progress: 100,
+          result: { success: true, proof_id: 3 },
+        }),
+      ),
+    );
+    const r = await newClient().getJobWithRetry('job-1');
+    expect(r.retryAfterMs).toBeNull();
+  });
+
+  it('ignores a malformed (non-integer) Retry-After', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/:id`, () =>
+        HttpResponse.json(
+          { status: 'queued', phase: 'queued' },
+          { headers: { 'Retry-After': 'Wed, 21 Oct 2099 07:28:00 GMT' } },
+        ),
+      ),
+    );
+    const r = await newClient().getJobWithRetry('job-1');
+    expect(r.retryAfterMs).toBeNull();
+  });
+
+  it('URL-encodes the job id in the path', async () => {
+    let observed = '';
+    server.use(
+      http.get(`${BASE}/api/jobs/:id`, ({ params }) => {
+        observed = params.id as string;
+        return HttpResponse.json({ status: 'queued', phase: 'queued' });
+      }),
+    );
+    await newClient().getJob('a/b');
+    expect(observed).toBe('a/b');
+  });
+});
+
+describe('ZkCoinsClient.commitJob / cancelJob', () => {
+  it('commitJob posts the commit body and resolves on the broadcasting accept', async () => {
+    let body: unknown = null;
+    let path = '';
+    server.use(
+      http.post(`${BASE}/api/jobs/:id/commit`, async ({ request, params }) => {
+        body = await request.json();
+        path = params.id as string;
+        return HttpResponse.json({ status: 'broadcasting' });
       }),
     );
     const req = { proof_id: 5, public_key: 'aa', signature: 'bb', message: 'cc' };
-    await newClient().commit(req);
-    expect(observed).toEqual(req);
+    await expect(newClient().commitJob('send-1', req)).resolves.toBeUndefined();
+    expect(body).toEqual(req);
+    expect(path).toBe('send-1');
   });
 
-  it('claimUsername: forwards the signed claim body', async () => {
+  it('commitJob surfaces a 409 (not awaiting_signature) as ApiError', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/:id/commit`, () =>
+        HttpResponse.json({ error: 'Job is in status `completed`' }, { status: 409 }),
+      ),
+    );
+    await expect(
+      newClient().commitJob('send-1', {
+        proof_id: 1,
+        public_key: 'a',
+        signature: 'b',
+        message: 'c',
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('cancelJob resolves on the cancelled accept', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/:id/cancel`, () => HttpResponse.json({ status: 'cancelled' })),
+    );
+    await expect(newClient().cancelJob('job-1')).resolves.toBeUndefined();
+  });
+
+  it('cancelJob surfaces a 409 (no longer cancellable) as ApiError', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/:id/cancel`, () =>
+        HttpResponse.json({ error: 'Job is not in a cancellable state' }, { status: 409 }),
+      ),
+    );
+    await expect(newClient().cancelJob('job-1')).rejects.toThrow(/cancellable/);
+  });
+});
+
+describe('ZkCoinsClient.streamJob (SSE)', () => {
+  const sse = (frames: string): Response =>
+    new Response(frames, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
+
+  it('yields each phase frame and stops after event: complete', async () => {
+    const frames =
+      'event: phase\ndata: {"status":"proving","phase":"proving","proof_id":null,"result":null,"error":null}\n\n' +
+      ': heartbeat\n\n' +
+      'event: phase\ndata: {"status":"awaiting_signature","phase":"awaiting_signature","proof_id":17,"result":null,"error":null}\n\n' +
+      'event: complete\ndata: {"status":"completed","phase":"completed","proof_id":null,"result":{"success":true,"proof_id":3},"error":null}\n\n';
+    const client = new ZkCoinsClient({ apiUrl: BASE, fetch: async () => sse(frames) });
+    const seen: string[] = [];
+    for await (const s of client.streamJob('job-1')) {
+      seen.push(s.status);
+    }
+    expect(seen).toEqual(['proving', 'awaiting_signature', 'completed']);
+  });
+
+  it('surfaces a 404 as ApiError before yielding', async () => {
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      fetch: async () => new Response('{"error":"Job not found"}', { status: 404 }),
+    });
+    const gen = client.streamJob('nope');
+    await expect(gen.next()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('returns when the stream ends before a complete frame (done path)', async () => {
+    // A single phase frame, then the stream closes (no terminal frame).
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      fetch: async () => sse('event: phase\ndata: {"status":"proving","phase":"proving"}\n\n'),
+    });
+    const seen: string[] = [];
+    for await (const s of client.streamJob('job-1')) {
+      seen.push(s.status);
+    }
+    expect(seen).toEqual(['proving']);
+  });
+
+  it('throws when the response has no readable body', async () => {
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      // A 200 with a null body (Response with null body + ok status).
+      fetch: async () => new Response(null, { status: 200 }),
+    });
+    const gen = client.streamJob('job-1');
+    await expect(gen.next()).rejects.toThrow(/no readable body/);
+  });
+
+  it('does not start the stream when given an already-aborted signal', async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      fetch: async (_input, init) => {
+        // The composed controller is aborted before the fetch resolves.
+        if ((init?.signal as AbortSignal | undefined)?.aborted) {
+          throw new DOMException('aborted', 'AbortError');
+        }
+        return sse('event: complete\ndata: {"status":"completed","phase":"completed"}\n\n');
+      },
+    });
+    const gen = client.streamJob('job-1', ctrl.signal);
+    await expect(gen.next()).rejects.toThrow();
+  });
+
+  // A stream whose pending `read()` rejects when `sig` aborts — models
+  // a real fetch body cancelling on AbortController.abort().
+  const abortableStream = (sig: AbortSignal): ReadableStream<Uint8Array> =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        sig.addEventListener(
+          'abort',
+          () => controller.error(new DOMException('aborted', 'AbortError')),
+          {
+            once: true,
+          },
+        );
+      },
+    });
+
+  it('detaches when the caller aborts a live stream mid-flight', async () => {
+    const ctrl = new AbortController();
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      fetch: async (_input, init) =>
+        new Response(abortableStream(init!.signal as AbortSignal), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const gen = client.streamJob('job-1', ctrl.signal);
+    const next = gen.next();
+    ctrl.abort(); // fires the addEventListener('abort') callback → controller.abort()
+    await expect(next).rejects.toThrow();
+  });
+
+  it('aborts the stream when the request timeout elapses', async () => {
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      requestTimeoutMs: 30,
+      fetch: async (_input, init) =>
+        new Response(abortableStream(init!.signal as AbortSignal), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    });
+    const gen = client.streamJob('job-1');
+    await expect(gen.next()).rejects.toThrow();
+  });
+
+  it('handles a frame split across two chunks', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        controller.enqueue(enc.encode('event: complete\nda'));
+        controller.enqueue(enc.encode('ta: {"status":"completed","phase":"completed"}\n\n'));
+        controller.close();
+      },
+    });
+    const client = new ZkCoinsClient({
+      apiUrl: BASE,
+      fetch: async () =>
+        new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    });
+    const seen: string[] = [];
+    for await (const s of client.streamJob('job-1')) {
+      seen.push(s.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+});
+
+describe('ZkCoinsClient.resolveUsername / claimUsername', () => {
+  it('resolveUsername URL-encodes the username in the path', async () => {
+    let observed = '';
+    server.use(
+      http.get(`${BASE}/api/username/resolve/:name`, ({ params }) => {
+        observed = params.name as string;
+        return HttpResponse.json({ username: 'a b', address: 'cd' });
+      }),
+    );
+    await newClient().resolveUsername('a b');
+    expect(observed).toBe('a b');
+  });
+
+  it('claimUsername forwards the signed claim body', async () => {
     let observed: unknown = null;
     server.use(
       http.post(`${BASE}/api/username/claim`, async ({ request }) => {
@@ -227,43 +597,11 @@ describe('ZkCoinsClient.send / commit / claimUsername (POST methods)', () => {
   });
 });
 
-describe('ZkCoinsClient.resolveUsername', () => {
-  it('URL-encodes the username in the path', async () => {
-    let observed = '';
-    server.use(
-      http.get(`${BASE}/api/username/resolve/:name`, ({ params }) => {
-        observed = params.name as string;
-        return HttpResponse.json({ username: 'a b', address: 'cd' });
-      }),
-    );
-    await newClient().resolveUsername('a b');
-    expect(observed).toBe('a b');
-  });
-});
-
-describe('ZkCoinsClient.history (issue #153 placeholder)', () => {
-  it('throws NotImplementedError', async () => {
-    await expect(newClient().history('ab')).rejects.toThrow(NotImplementedError);
-  });
-
-  it('includes the tracking issue URL in the error', async () => {
-    try {
-      await newClient().history('ab');
-      throw new Error('expected throw');
-    } catch (e) {
-      expect(e).toBeInstanceOf(NotImplementedError);
-      expect((e as NotImplementedError).issueUrl).toBe(
-        'https://github.com/zk-coins/node/issues/153',
-      );
-    }
-  });
-});
-
 describe('ZkCoinsClient error handling', () => {
-  it('maps non-2xx with structured envelope to ApiError with serverError extracted', async () => {
+  it('maps a Jobs-API {error} envelope to ApiError with serverError extracted', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () =>
-        HttpResponse.json({ success: false, error: 'address not found' }, { status: 404 }),
+        HttpResponse.json({ error: 'address not found' }, { status: 404 }),
       ),
     );
     try {
@@ -278,20 +616,16 @@ describe('ZkCoinsClient error handling', () => {
     }
   });
 
-  it('falls back to raw body when failure body is not JSON', async () => {
+  it('falls back to raw body when the failure body is not JSON', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () => new HttpResponse('plain text 502', { status: 502 })),
     );
-    try {
-      await newClient().balance('zz');
-      throw new Error('expected throw');
-    } catch (e) {
-      expect(e).toBeInstanceOf(ApiError);
-      expect((e as ApiError).serverError).toBe('plain text 502');
-    }
+    await expect(newClient().balance('zz')).rejects.toMatchObject({
+      serverError: 'plain text 502',
+    });
   });
 
-  it('falls back to raw body when JSON body has no `error` string', async () => {
+  it('falls back to raw body when JSON has no error string', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () => HttpResponse.json({ status: 'down' }, { status: 503 })),
     );
@@ -308,7 +642,6 @@ describe('ZkCoinsClient timeout + abort', () => {
   it('aborts when the per-request timeout elapses', async () => {
     server.use(
       http.get(`${BASE}/api/info`, async () => {
-        // Never resolve — let the client's timeout fire.
         await new Promise(() => {});
         return HttpResponse.json({ network: 'Mainnet' });
       }),
