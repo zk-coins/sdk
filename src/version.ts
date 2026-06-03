@@ -6,4 +6,4 @@
  * `test/version.test.ts` will fail on CI if this constant ever
  * diverges from `package.json`.
  */
-export const VERSION = '0.1.1';
+export const VERSION = '0.2.0';
