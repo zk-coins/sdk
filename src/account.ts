@@ -102,11 +102,32 @@ export interface WaitForJobOpts {
   signal?: AbortSignal;
 }
 
+/** Knobs for `waitForIncoming`'s balance-polling loop. */
+export interface WaitForIncomingOpts {
+  /**
+   * Balance (in sats) below which the helper keeps waiting. Defaults to
+   * the balance read at the moment `waitForIncoming` is called, so the
+   * helper resolves on the first observed *increase*. Pass an explicit
+   * value to wait until the balance reaches a known target instead.
+   */
+  fromBalance?: number;
+  /** Poll interval in ms. Default 5000. */
+  pollIntervalMs?: number;
+  /** Hard timeout for the whole wait. Default 300_000ms (5 min). */
+  timeoutMs?: number;
+  /** Invoked on each poll with the freshly-read balance. */
+  onPoll?: (balance: BalanceResponse) => void;
+  /** Abort the wait early. */
+  signal?: AbortSignal;
+}
+
 /** A `waitForJob` target — one or more non-terminal statuses to stop at, plus the terminal set. */
 type StopStatus = JobStatus['status'];
 
 const DEFAULT_POLL_INTERVAL_MS = 1_500;
 const DEFAULT_WAIT_TIMEOUT_MS = 180_000;
+const DEFAULT_INCOMING_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_INCOMING_TIMEOUT_MS = 300_000;
 const TERMINAL_STATUSES: ReadonlySet<StopStatus> = new Set(['completed', 'failed', 'cancelled']);
 
 export class ZkCoinsAccount {
@@ -305,6 +326,55 @@ export class ZkCoinsAccount {
   /** Per-address transaction history — `GET /api/history`. */
   async getTransactions(opts: HistoryOpts = {}): Promise<HistoryResponse> {
     return this.client.history(this.address, opts);
+  }
+
+  /**
+   * Receiving on zkCoins.
+   *
+   * There is **no client-initiated "receive" call** — and there should
+   * not be. A wallet receives by sharing its `address` (this account's
+   * `account.address`); the sender's `pay()` credits it server-side.
+   * The legacy `POST /api/receive` octet-stream route is internal
+   * plumbing, not a wallet method, and is deliberately *not* mirrored
+   * here (no fabricated endpoint).
+   *
+   * To observe an incoming credit, poll the authoritative balance /
+   * history (`getBalance()` / `getTransactions()`). `waitForIncoming`
+   * is an optional convenience over that polling loop: it reads the
+   * current balance, then polls until the balance rises above the
+   * baseline (or a caller-supplied `fromBalance`), and resolves with
+   * the updated `BalanceResponse`. It performs no signing and adds no
+   * trust assumption — it is purely `getBalance()` on a timer, so a
+   * consumer that prefers its own loop can ignore it entirely.
+   *
+   * @throws on timeout (a balance increase was not observed within
+   *   `timeoutMs`) or abort — never silently returns a stale balance.
+   */
+  async waitForIncoming(opts: WaitForIncomingOpts = {}): Promise<BalanceResponse> {
+    const pollInterval = opts.pollIntervalMs ?? DEFAULT_INCOMING_POLL_INTERVAL_MS;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_INCOMING_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+
+    // Baseline: the explicit target floor, or the balance at call time.
+    const baseline =
+      opts.fromBalance ?? (await this.client.balance(this.address, opts.signal)).balance;
+
+    for (;;) {
+      if (opts.signal?.aborted) {
+        throw new Error('waitForIncoming: aborted');
+      }
+      const current = await this.client.balance(this.address, opts.signal);
+      opts.onPoll?.(current);
+      if (current.balance > baseline) {
+        return current;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waitForIncoming: timed out after ${timeoutMs}ms; balance still ${current.balance} (baseline ${baseline})`,
+        );
+      }
+      await delay(pollInterval, opts.signal);
+    }
   }
 
   /**

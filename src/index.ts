@@ -39,6 +39,13 @@ export {
   JobResultSchema,
   JobStatusSchema,
   JobErrorResponseSchema,
+  ReadyResponseSchema,
+  PublisherHealthResponseSchema,
+  RootEndpointsSchema,
+  RootResponseSchema,
+  AddressesResponseSchema,
+  InscriptionKindSchema,
+  InscriptionSummarySchema,
 } from './schemas.js';
 export type {
   BalanceResponse,
@@ -56,6 +63,13 @@ export type {
   JobResult,
   JobStatus,
   JobErrorResponse,
+  ReadyResponse,
+  PublisherHealthResponse,
+  RootEndpoints,
+  RootResponse,
+  AddressesResponse,
+  InscriptionKind,
+  InscriptionSummary,
 } from './schemas.js';
 
 export { ApiError, JobFailedError } from './errors.js';
@@ -73,4 +87,10 @@ export type {
 } from './client.js';
 
 export { ZkCoinsAccount } from './account.js';
-export type { ZkCoinsAccountOptions, MintResult, PayResult, WaitForJobOpts } from './account.js';
+export type {
+  ZkCoinsAccountOptions,
+  MintResult,
+  PayResult,
+  WaitForJobOpts,
+  WaitForIncomingOpts,
+} from './account.js';

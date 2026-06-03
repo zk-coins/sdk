@@ -45,20 +45,30 @@ import { randomBytes } from '@noble/hashes/utils.js';
 import { API_URL, REQUEST_TIMEOUT_MS } from './config.js';
 import { ApiError } from './errors.js';
 import {
+  AddressesResponseSchema,
   BalanceResponseSchema,
   ClaimUsernameResponseSchema,
   HistoryResponseSchema,
   InfoResponseSchema,
+  InscriptionSummarySchema,
   JobAcceptedSchema,
   JobStatusSchema,
+  PublisherHealthResponseSchema,
+  ReadyResponseSchema,
   ResolveUsernameResponseSchema,
+  RootResponseSchema,
+  type AddressesResponse,
   type BalanceResponse,
   type ClaimUsernameResponse,
   type HistoryResponse,
   type InfoResponse,
+  type InscriptionSummary,
   type JobAccepted,
   type JobStatus,
+  type PublisherHealthResponse,
+  type ReadyResponse,
   type ResolveUsernameResponse,
+  type RootResponse,
 } from './schemas.js';
 
 /** Inputs to a mint job (`POST /api/jobs/mint`). */
@@ -184,6 +194,67 @@ export class ZkCoinsClient {
     this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   }
 
+  // ---- Service + health endpoints ----------------------------------------
+
+  /**
+   * Service identification — `GET /` → `RootResponse`. Package name +
+   * version, connected network, the advertised endpoint map, and a
+   * docs pointer. Useful for a "is this URL a zkCoins node, and which
+   * one?" preflight.
+   */
+  async root(signal?: AbortSignal): Promise<RootResponse> {
+    return this.request('/', RootResponseSchema, signal ? { signal } : {});
+  }
+
+  /**
+   * Liveness probe — `GET /health`. The node answers with the literal
+   * text `ok` (not JSON), so this returns the trimmed body string
+   * rather than a parsed object. A non-2xx surfaces as `ApiError`.
+   */
+  async health(signal?: AbortSignal): Promise<string> {
+    const { text } = await this.requestText('/health', signal ? { signal } : {});
+    return text.trim();
+  }
+
+  /**
+   * Readiness probe — `GET /health/ready` → `ReadyResponse`.
+   *
+   * The node returns **200** when ready and **503** when not, and both
+   * carry the same `ReadyResponse` body (the 503 lists the failing
+   * dependencies in `failures`). A not-ready node is a legitimate
+   * readiness answer, not a transport error, so this method parses and
+   * returns the body for both the 200 and 503 branches — read
+   * `result.ready` (or `result.failures`) to branch. Any *other*
+   * non-2xx (e.g. a 500) still surfaces as `ApiError`.
+   */
+  async ready(signal?: AbortSignal): Promise<ReadyResponse> {
+    return this.requestAllowingStatus(
+      '/health/ready',
+      ReadyResponseSchema,
+      503,
+      signal ? { signal } : {},
+    );
+  }
+
+  /**
+   * Publisher wallet state — `GET /health/publisher` →
+   * `PublisherHealthResponse` (`{address, utxo_count, total_sats}`).
+   *
+   * This is the only fee-relevant figure the node exposes: inscription
+   * fees are funded server-side from this wallet, so a depleting
+   * `total_sats` is the observable fee-spend signal. There is no client
+   * fee-estimation API (see the README "Fees" section). On an
+   * Esplora-side error the node returns 503 with a different shape
+   * (`{error, detail, address}`), which surfaces as `ApiError`.
+   */
+  async publisherHealth(signal?: AbortSignal): Promise<PublisherHealthResponse> {
+    return this.request(
+      '/health/publisher',
+      PublisherHealthResponseSchema,
+      signal ? { signal } : {},
+    );
+  }
+
   // ---- Read endpoints ----------------------------------------------------
 
   async balance(address: string, signal?: AbortSignal): Promise<BalanceResponse> {
@@ -209,6 +280,31 @@ export class ZkCoinsClient {
       HistoryResponseSchema,
       opts.signal ? { signal: opts.signal } : {},
     );
+  }
+
+  /**
+   * List the account addresses the node knows about — `GET /api/address`
+   * → `AddressesResponse`. Feature-gated node-side behind `address-list`
+   * (or `lnurl`): on a build without it the route is absent and the call
+   * 404s (surfaces as `ApiError`). Gate on `info.capabilities.address_list`
+   * before calling.
+   */
+  async addresses(signal?: AbortSignal): Promise<AddressesResponse> {
+    return this.request('/api/address', AddressesResponseSchema, signal ? { signal } : {});
+  }
+
+  /**
+   * Look up a single commit inscription by txid — `GET
+   * /api/inscriptions/:txid` → `InscriptionSummary`. `txid` is the
+   * big-endian display hex a block explorer shows (64 hex chars); the
+   * node reverses it internally to match the stored little-endian
+   * bytes. An unknown txid 404s, a malformed one 422s — both as
+   * `ApiError`. This is an operator/forensics read, not part of the
+   * spend flow.
+   */
+  async inscription(txid: string, signal?: AbortSignal): Promise<InscriptionSummary> {
+    const url = `/api/inscriptions/${encodeURIComponent(txid)}`;
+    return this.request(url, InscriptionSummarySchema, signal ? { signal } : {});
   }
 
   // ---- Username endpoints -------------------------------------------------
@@ -445,6 +541,84 @@ export class ZkCoinsClient {
   ): Promise<T> {
     const { data } = await this.requestWithHeaders(path, schema, options, parse);
     return data;
+  }
+
+  /**
+   * Like `request` but also accepts a single non-2xx status as a valid
+   * response to parse rather than throw. Used by `ready()`, where the
+   * node returns `503` with a full `ReadyResponse` body on a not-ready
+   * node — a legitimate readiness answer, not a transport error. Any
+   * other non-2xx (and the 2xx case) flows through `requestWithHeaders`
+   * unchanged: those still map to `ApiError`.
+   */
+  private async requestAllowingStatus<T>(
+    path: string,
+    schema: z.ZodType<T>,
+    allowStatus: number,
+    options: RequestInit & { signal?: AbortSignal } = {},
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    if (options.signal) {
+      if (options.signal.aborted) {
+        controller.abort();
+      } else {
+        options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+    }
+
+    try {
+      const res = await this.fetchImpl(`${this.apiUrl}${path}`, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers as Record<string, string> | undefined),
+        },
+        signal: controller.signal,
+      });
+      const rawText = await res.text();
+      if (!res.ok && res.status !== allowStatus) {
+        throw new ApiError(res.status, extractServerError(rawText), rawText);
+      }
+      return schema.parse(JSON.parse(rawText));
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
+  /**
+   * Plain-text variant of `request` for the one endpoint that does not
+   * return JSON — `GET /health`, which answers with the literal body
+   * `ok`. Maps non-2xx onto `ApiError` (raw body as the message); on a
+   * 2xx returns the body text verbatim for the caller to trim/inspect.
+   */
+  private async requestText(
+    path: string,
+    options: RequestInit & { signal?: AbortSignal } = {},
+  ): Promise<{ text: string }> {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    if (options.signal) {
+      if (options.signal.aborted) {
+        controller.abort();
+      } else {
+        options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+    }
+
+    try {
+      const res = await this.fetchImpl(`${this.apiUrl}${path}`, {
+        ...options,
+        signal: controller.signal,
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new ApiError(res.status, extractServerError(text), text);
+      }
+      return { text };
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
   }
 
   /**

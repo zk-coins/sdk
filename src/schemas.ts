@@ -294,3 +294,159 @@ export const JobErrorResponseSchema = z.object({
   error: z.string(),
 });
 export type JobErrorResponse = z.infer<typeof JobErrorResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Health (`GET /health/ready`, `GET /health/publisher`)
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /health/ready` — `router::ReadyResponse`. The readiness probe
+ * (DB + Esplora + prover-warmup); 200 when `ready`, 503 otherwise (a
+ * 503 still carries this body, so a caller that wants the `failures`
+ * detail on a not-ready node should read `ApiError.rawBody` and parse
+ * it with this schema, or call the dedicated `ready()` client method
+ * which returns the body for both branches).
+ *
+ * - `ready` — overall gate (`failures` empty).
+ * - `failures` — zero or more of `"db"`, `"esplora"`, `"prover"`.
+ * - `status` — lifecycle tag (`"ready"` | `"starting"`).
+ * - `prover` — background-warmup tag (`"ready"` | `"warming"`).
+ *
+ * The `&'static str` fields are open-coded as `z.string()` rather than
+ * a closed enum: the node may add a lifecycle tag without it being a
+ * contract break, and the SDK should pass the value through rather
+ * than 422 on an unknown-but-valid string.
+ */
+export const ReadyResponseSchema = z.object({
+  ready: z.boolean(),
+  failures: z.array(z.string()),
+  status: z.string(),
+  prover: z.string(),
+});
+export type ReadyResponse = z.infer<typeof ReadyResponseSchema>;
+
+/**
+ * `GET /health/publisher` (200 branch) — `router::PublisherHealthResponse`.
+ * The publisher Taproot wallet's UTXO state. This is the only
+ * fee-relevant figure the node exposes: inscription fees are paid
+ * server-side from this wallet, and `total_sats` depleting over time is
+ * the observable signal of fee spend. There is no client fee-estimation
+ * API (see the README "Fees" section).
+ *
+ * The 503 branch returns a different shape (`{error, detail, address}`)
+ * which the client surfaces as an `ApiError` rather than parsing here.
+ */
+export const PublisherHealthResponseSchema = z.object({
+  /** Publisher Taproot bech32 address — log-only, not a secret. */
+  address: z.string(),
+  utxo_count: z.number(),
+  total_sats: z.number(),
+});
+export type PublisherHealthResponse = z.infer<typeof PublisherHealthResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Root / service info (`GET /`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Endpoint map advertised by `GET /` — `router::RootEndpoints`. Every
+ * value is a free-text `"METHOD  /path"` advertisement string (not a
+ * URL to call programmatically); kept as `z.string()` so a node adding
+ * or rewording an entry does not 422 a client. Feature-gated routes are
+ * intentionally omitted by the node from this map.
+ */
+export const RootEndpointsSchema = z.object({
+  info: z.string(),
+  balance: z.string(),
+  history: z.string(),
+  receive: z.string(),
+  admit_mint: z.string(),
+  admit_send: z.string(),
+  get_job: z.string(),
+  stream_job: z.string(),
+  commit: z.string(),
+  cancel: z.string(),
+  proof: z.string(),
+  inscription: z.string(),
+  username_resolve: z.string(),
+  health: z.string(),
+  health_ready: z.string(),
+  health_publisher: z.string(),
+  openapi: z.string(),
+  docs: z.string(),
+});
+export type RootEndpoints = z.infer<typeof RootEndpointsSchema>;
+
+/**
+ * `GET /` — `router::RootResponse`. Service identification: package
+ * name + version, connected network, public endpoint map, and a pointer
+ * to the hosted docs. Cheaper than a static landing page; answers the
+ * "is this the right host?" question without a bare 404.
+ */
+export const RootResponseSchema = z.object({
+  service: z.string(),
+  version: z.string(),
+  network: z.string(),
+  endpoints: RootEndpointsSchema,
+  docs: z.string(),
+});
+export type RootResponse = z.infer<typeof RootResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Address list (`GET /api/address`, feature-gated `address-list` | `lnurl`)
+// ---------------------------------------------------------------------------
+
+/**
+ * `GET /api/address` — `router::AddressesResponse`. The list of account
+ * addresses the node knows about. Feature-gated behind the
+ * `address-list` (or `lnurl`) Cargo feature: on a build without it the
+ * route is absent and a request 404s via the fallback. Gate the call on
+ * `info.capabilities.address_list`.
+ */
+export const AddressesResponseSchema = z.object({
+  addresses: z.array(z.string()),
+});
+export type AddressesResponse = z.infer<typeof AddressesResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// Inscriptions (`GET /api/inscriptions/:txid`)
+// ---------------------------------------------------------------------------
+
+/** Inscription kind — `db::InscriptionKind` (`serde(rename_all = "lowercase")`). */
+export const InscriptionKindSchema = z.enum(['mint', 'send']);
+export type InscriptionKind = z.infer<typeof InscriptionKindSchema>;
+
+/**
+ * `GET /api/inscriptions/:txid` — `db::InscriptionSummary`. The
+ * public-facing view of a single commit inscription, looked up by its
+ * commit txid (big-endian display hex, the same form a block explorer
+ * shows). Surfaces `(kind, status, value, timestamps)` without the raw
+ * commit/reveal/commitment blobs.
+ *
+ * - `commit_txid` / `reveal_txid` — lowercase hex, display order.
+ *   `reveal_txid` is `null` only for rows predating migration 0008.
+ * - `kind` — `"mint"` | `"send"`.
+ * - `status` — the `pending_inscriptions.status` string verbatim
+ *   (`"pending"`, `"confirmed"`, `"failed"`, …); kept open as a string
+ *   rather than a closed enum since the node owns that lifecycle.
+ * - `commit_output_value` — sats locked in the commit output.
+ * - `failure_reason` — the error chain when `status = "failed"`,
+ *   otherwise `null`.
+ * - `created_at` / `updated_at` — RFC-3339 UTC, microsecond precision,
+ *   trailing `Z`.
+ *
+ * This is an operator/forensics lookup, not part of the send/receive
+ * flow — the wallet never needs it to spend, but it is a legitimate
+ * read endpoint so the SDK mirrors it.
+ */
+export const InscriptionSummarySchema = z.object({
+  commit_txid: z.string(),
+  reveal_txid: z.string().nullable(),
+  kind: InscriptionKindSchema,
+  status: z.string(),
+  commit_output_value: z.number(),
+  failure_reason: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+});
+export type InscriptionSummary = z.infer<typeof InscriptionSummarySchema>;
