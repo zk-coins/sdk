@@ -270,6 +270,60 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
     expect(first.address).toBe(account.address);
   });
 
+  it('hydrates numPubkeys forward from the server num_sends (lost local state / multi-device)', async () => {
+    // Fresh in-memory account starts at 0, but the server reports this
+    // account has already done 3 sends. The thin-client invariant means
+    // pay() must derive + sign at index 3 (not 0) and advance to 4.
+    let phase: 'await' | 'committed' = 'await';
+    let commitBody: { public_key: string } | null = null;
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 3 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: 'send-hyd', status: 'queued' }, { status: 202 }),
+      ),
+      http.post(`${BASE}/api/jobs/send-hyd/commit`, async ({ request }) => {
+        commitBody = (await request.json()) as { public_key: string };
+        phase = 'committed';
+        return HttpResponse.json({ status: 'broadcasting' });
+      }),
+      http.get(`${BASE}/api/jobs/send-hyd`, () =>
+        phase === 'await'
+          ? HttpResponse.json(
+              {
+                job_id: 'send-hyd',
+                kind: 'send',
+                status: 'awaiting_signature',
+                phase: 'awaiting_signature',
+                progress: 60,
+                proof_id: 7,
+                result: { success: true, account_state_hash: ASH, output_coins_root: OCR },
+              },
+              { headers: { 'Retry-After': '0' } },
+            )
+          : HttpResponse.json({
+              job_id: 'send-hyd',
+              kind: 'send',
+              status: 'completed',
+              phase: 'completed',
+              progress: 100,
+              result: { success: true, proof_id: 7 },
+            }),
+      ),
+    );
+    const account = await newAccount();
+    expect(account.getNumPubkeys()).toBe(0);
+
+    await account.pay(RECIPIENT, 100);
+
+    // Hydrated to 3, derived/signed at index 3, then advanced to 4.
+    expect(account.getNumPubkeys()).toBe(4);
+    const { generateAccountKeysFromMnemonic, derivePublicKeys } =
+      await import('../src/derivation.js');
+    const { xpriv } = await generateAccountKeysFromMnemonic(TEST_MNEMONIC, '');
+    const idx3 = await derivePublicKeys(xpriv, 3);
+    expect((commitBody as unknown as { public_key: string }).public_key).toBe(idx3.publicKey);
+  });
+
   it('signs the send message with a signature that verifies on the server side', async () => {
     let sendBody: Record<string, unknown> | null = null;
     let phase: 'await' | 'done' = 'await';

@@ -194,7 +194,9 @@ export class ZkCoinsAccount {
    *
    * Steps (all server-mediated):
    *
-   *   1. Refresh balance from the server — the thin-client invariant.
+   *   1. Refresh balance from the server — the thin-client invariant —
+   *      and hydrate `numPubkeys` forward from the authoritative
+   *      `num_sends`.
    *   2. Derive `public_key` at index `numPubkeys` and
    *      `next_public_key` at index `numPubkeys + 1`.
    *   3. Build + SHA-256 the send message, Schnorr-sign at `numPubkeys`.
@@ -210,8 +212,16 @@ export class ZkCoinsAccount {
   async pay(recipient: string, amountSats: number, assetId?: string): Promise<PayResult> {
     // 1. Re-fetch authoritative state (surfaces "balance too low" /
     // "address unknown" / "API down" as a regular ApiError before we
-    // sign anything).
-    await this.client.balance(this.address);
+    // sign anything). The server's `num_sends` is the canonical send
+    // counter (thin-client invariant): hydrate our local derivation
+    // index forward from it so a wallet that lost local state — or sent
+    // from another device — derives at the correct next index instead
+    // of reusing index 0. Never regress below the local counter, which
+    // would risk reusing an in-flight derivation index.
+    const balance = await this.client.balance(this.address);
+    if (balance.num_sends > this.numPubkeys) {
+      this.numPubkeys = balance.num_sends;
+    }
 
     // 2. Derive the pubkey pair for this send.
     const { publicKey, nextPublicKey } = await derivePublicKeys(this.xpriv, this.numPubkeys);
