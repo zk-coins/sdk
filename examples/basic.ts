@@ -49,6 +49,33 @@ async function main(): Promise<void> {
   console.warn('network:', info.bitcoin_network ?? info.network);
   console.warn('multi-asset:', info.capabilities?.multi_asset ?? false);
 
+  // 2b. Service + health probes. `ready()` returns the body for both
+  //     the ready (200) and not-ready (503) branches; `publisherHealth()`
+  //     is the only fee-relevant figure the node exposes (the operator-
+  //     funded wallet that pays inscription fees — there is no client
+  //     fee API).
+  const root = await account.client.root();
+  console.warn('service:', root.service, root.version);
+  console.warn('liveness:', await account.client.health());
+  const readiness = await account.client.ready();
+  console.warn('readiness:', readiness.ready ? 'ready' : `starting (${readiness.failures.join()})`);
+  try {
+    const pub = await account.client.publisherHealth();
+    console.warn(
+      'publisher sats (fee budget):',
+      pub.total_sats,
+      'across',
+      pub.utxo_count,
+      'utxo(s)',
+    );
+  } catch (err) {
+    if (err instanceof ApiError) {
+      console.warn('publisher health unavailable:', err.status, err.serverError);
+    } else {
+      throw err;
+    }
+  }
+
   // 3. Read the node's view of this address.
   const initial = await account.getBalance();
   console.warn('initial balance:', initial.balance, 'sats; num_sends:', initial.num_sends);
@@ -72,9 +99,18 @@ async function main(): Promise<void> {
   const post = await account.getBalance();
   console.warn('post-mint balance:', post.balance, 'sats');
 
-  // 6. List recent history.
+  // 6. List recent history. Each mint/send/receive shows up as a row;
+  //    a row with a `txid` can be looked up via
+  //    `account.client.inscription(txid)` for its on-chain status.
   const history = await account.getTransactions({ limit: 5 });
   console.warn('recent transactions:', history.items.length, 'of', history.total);
+
+  // 6b. Receiving: there is no "receive" call — share `account.address`
+  //     and poll. `waitForIncoming` is the optional convenience helper
+  //     (pure getBalance() on a timer). Not awaited here so the example
+  //     stays non-blocking; in a wallet you'd await it (or run your own
+  //     balance/history poll) after showing the address to the sender.
+  console.warn('to receive, share this address:', account.address);
 
   // 7. Claim a random username. The signed-claim flow signs a fixed-
   //    prefix message with the identity key at index 0.

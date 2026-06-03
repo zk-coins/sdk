@@ -2,7 +2,7 @@
 
 Pure-TypeScript wallet SDK for [zkCoins](https://zkcoins.app). One package covers BIP-39 / BIP-32 derivation, BIP-340 Schnorr signing, the typed REST client for the **Jobs API** (`/api/jobs/*`), and a high-level account adapter that wallet integrators (Cake Wallet, Layerz Wallet, the in-tree web app) consume as a drop-in `InterfaceAccountBasedWallet`-style API.
 
-> Status: v0.2.0 — migrated to the asynchronous Jobs API. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow and [`CHANGELOG.md`](./CHANGELOG.md) for the breaking changes.
+> Status: v0.3.0 — complete node-endpoint coverage (service/health probes, address list, inscription lookup, a `receive` polling helper). See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow and [`CHANGELOG.md`](./CHANGELOG.md) for the change log.
 
 ## Why pure TypeScript
 
@@ -126,6 +126,8 @@ class ZkCoinsAccount {
   mint(amountSats: number, assetId?: string): Promise<MintResult>;
   pay(recipient: string, amountSats: number, assetId?: string): Promise<PayResult>;
   getTransactions(opts?: HistoryOpts): Promise<HistoryResponse>;
+  // Receiving: share `address`, then poll for the credit (see "Receiving").
+  waitForIncoming(opts?: WaitForIncomingOpts): Promise<BalanceResponse>;
   waitForJob(
     jobId: string,
     stopAt: ReadonlySet<JobStatus['status']>,
@@ -139,7 +141,68 @@ class ZkCoinsAccount {
 }
 ```
 
-Lower-level building blocks are also exported (custom signing flows, key-derivation helpers, the raw `ZkCoinsClient`, every Zod schema + typed error, and `newIdempotencyKey`).
+### `ZkCoinsClient` — full endpoint reference
+
+The lower-level `ZkCoinsClient` (also `account.client`) mirrors **every** node endpoint a wallet legitimately reads or drives. Each method validates the response against a Zod schema and maps a non-2xx onto `ApiError` (no silent fallback).
+
+| Method                               | Node route                       | Returns                     |
+| ------------------------------------ | -------------------------------- | --------------------------- |
+| `root()`                             | `GET /`                          | `RootResponse`              |
+| `health()`                           | `GET /health`                    | `string` (`"ok"`)           |
+| `ready()`                            | `GET /health/ready`              | `ReadyResponse`¹            |
+| `publisherHealth()`                  | `GET /health/publisher`          | `PublisherHealthResponse`   |
+| `info()`                             | `GET /api/info`                  | `InfoResponse`              |
+| `balance(address)`                   | `GET /api/balance`               | `BalanceResponse`           |
+| `history(address, opts?)`            | `GET /api/history`               | `HistoryResponse`           |
+| `addresses()`                        | `GET /api/address`²              | `AddressesResponse`         |
+| `inscription(txid)`                  | `GET /api/inscriptions/:txid`    | `InscriptionSummary`        |
+| `resolveUsername(name)`              | `GET /api/username/resolve/:u`   | `ResolveUsernameResponse`   |
+| `claimUsername(signedReq)`           | `POST /api/username/claim`²      | `ClaimUsernameResponse`     |
+| `mintJob(req, idem)`                 | `POST /api/jobs/mint`            | `JobAccepted`               |
+| `sendJob(signedReq, idem)`           | `POST /api/jobs/send`            | `JobAccepted`               |
+| `getJob(id)` / `getJobWithRetry(id)` | `GET /api/jobs/:id`              | `JobStatus` (+ retry)       |
+| `commitJob(id, req)`                 | `POST /api/jobs/:id/commit`      | `void`                      |
+| `cancelJob(id)`                      | `POST /api/jobs/:id/cancel`      | `void`                      |
+| `streamJob(id)`                      | `GET /api/jobs/:id/stream` (SSE) | `AsyncGenerator<JobStatus>` |
+
+¹ `ready()` returns the body for **both** the 200 (ready) and 503 (not-ready) branches — a not-ready node is a valid readiness answer, not a transport error. Read `result.ready` / `result.failures`. Any other non-2xx still throws `ApiError`.
+² Feature-gated node-side (`address-list` / `username-claim` Cargo features). Gate the call on `info().capabilities.address_list` / `.username_claim`; a build without the feature 404s the route.
+
+**Deliberately not exposed:**
+
+- `GET /api/proof/:id` returns a **binary bincode `CoinProof`** blob. A pure-TS SDK does not decode bincode, and the wallet does not need to: it reads `account_state_hash` / `output_coins_root` from the `awaiting_signature` job result to build the commitment, never from the proof blob. Mirroring this as a method would require either a bincode decoder or a fake — neither is acceptable, so it is omitted.
+- `POST /api/receive` is a legacy octet-stream route, not a wallet operation — see **Receiving** below.
+- `GET /api/admin/r2-probe/history` is an operator telemetry endpoint, out of wallet-SDK scope.
+
+Other building blocks are exported too (custom signing flows, key-derivation helpers, every Zod schema + typed error, and `newIdempotencyKey`).
+
+## Receiving
+
+There is **no client-initiated "receive" call**, by design. A zkCoins account receives by sharing its `address` — the sender's `pay()` credits it server-side. (The node's `POST /api/receive` is internal plumbing, not a wallet method, and is intentionally not mirrored here.)
+
+To observe an incoming credit, poll the authoritative balance / history:
+
+```ts
+// Share this with the sender:
+console.warn('my address:', account.address);
+
+// Option A — your own loop over getBalance() / getTransactions().
+// Option B — the built-in convenience helper (pure getBalance() on a
+// timer; no signing, no extra trust assumption):
+const updated = await account.waitForIncoming({ timeoutMs: 120_000 });
+console.warn('received! new balance:', updated.balance);
+```
+
+`waitForIncoming` reads the current balance as a baseline (or takes an explicit `fromBalance`), then polls until the balance rises above it, resolving with the updated `BalanceResponse`. It **throws** on timeout rather than returning a stale balance.
+
+## Fees
+
+zkCoins has **no client-side fee estimation, and the SDK fabricates none.** The node exposes no fee-estimation endpoint:
+
+- **Mint** amounts are server-controlled (DEV faucet / authorised issuance).
+- **Send / inscription fees** are paid server-side from the operator-funded publisher wallet — the wallet never constructs or signs a Bitcoin fee.
+
+The only fee-relevant figure the node surfaces is the publisher wallet's UTXO state via `client.publisherHealth()` (`{ address, utxo_count, total_sats }`); a depleting `total_sats` is the observable fee-spend signal. There is deliberately no `fees()` method — adding one would mean inventing a number the node does not provide.
 
 ## Compatibility
 

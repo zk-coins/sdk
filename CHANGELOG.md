@@ -4,6 +4,52 @@ All notable changes to `@zkcoins/sdk` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0]
+
+Endpoint-coverage completion. The SDK now mirrors **every** node
+endpoint a wallet legitimately reads or drives, hardens error handling
+across the new surface, and documents the receive pattern and the
+(deliberate) absence of a fee API. Purely additive — no breaking
+changes to the 0.2.0 surface.
+
+### Added
+
+- **Service + health client methods** on `ZkCoinsClient`:
+  - `root()` — `GET /` → `RootResponse` (service id + advertised
+    endpoint map + docs pointer).
+  - `health()` — `GET /health` → the plain-text `"ok"` liveness body.
+  - `ready()` — `GET /health/ready` → `ReadyResponse`. Returns the body
+    for **both** the 200 (ready) and 503 (not-ready) branches — a
+    not-ready node is a valid readiness answer, not a transport error;
+    any other non-2xx still throws `ApiError`.
+  - `publisherHealth()` — `GET /health/publisher` →
+    `PublisherHealthResponse` (`{address, utxo_count, total_sats}`), the
+    only fee-relevant figure the node exposes.
+- **Read client methods**: `addresses()` (`GET /api/address`, feature-
+  gated) and `inscription(txid)` (`GET /api/inscriptions/:txid`).
+- **`ZkCoinsAccount.waitForIncoming(opts?)`** — an optional balance-
+  polling helper for the receive pattern: reads a baseline (or an
+  explicit `fromBalance`), then resolves with the updated
+  `BalanceResponse` on the first observed increase. Throws on timeout
+  (never returns a stale balance). Pure `getBalance()` on a timer — no
+  signing, no extra trust assumption.
+- **New schemas / types**: `RootResponse(Schema)`, `RootEndpoints(Schema)`,
+  `ReadyResponse(Schema)`, `PublisherHealthResponse(Schema)`,
+  `AddressesResponse(Schema)`, `InscriptionSummary(Schema)`,
+  `InscriptionKind(Schema)`, and `WaitForIncomingOpts`.
+
+### Documentation
+
+- README gains a full `ZkCoinsClient` endpoint-reference table, a
+  **Receiving** section (share address → poll balance/history), and a
+  **Fees** section stating plainly that there is no client fee API and
+  the SDK fabricates none.
+- Documented the deliberately-omitted endpoints and why: `GET
+/api/proof/:id` (binary bincode, not decodable in pure TS and not
+  needed — the wallet reads `ash`/`ocr` from the job result),
+  `POST /api/receive` (legacy plumbing), and `GET
+/api/admin/r2-probe/history` (operator telemetry, out of scope).
+
 ## [0.2.0]
 
 Migration to the asynchronous **Jobs API**. The node removed the
