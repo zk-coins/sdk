@@ -575,6 +575,93 @@ describe('ZkCoinsAccount.getTransactions', () => {
   });
 });
 
+describe('ZkCoinsAccount.waitForIncoming', () => {
+  it('resolves on the first balance increase above the call-time baseline', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${BASE}/api/balance`, () => {
+        calls += 1;
+        // call 1: baseline read = 0; call 2: still 0; call 3: 5000 (incoming).
+        const balance = calls >= 3 ? 5_000 : 0;
+        return HttpResponse.json({ balance, num_sends: 0 });
+      }),
+    );
+    const account = await newAccount();
+    const r = await account.waitForIncoming({ pollIntervalMs: 0 });
+    expect(r.balance).toBe(5_000);
+  });
+
+  it('uses an explicit fromBalance floor instead of re-reading the baseline', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${BASE}/api/balance`, () => {
+        calls += 1;
+        // No baseline read happens (fromBalance is supplied); first poll
+        // is already above the floor.
+        return HttpResponse.json({ balance: 9_000, num_sends: 0 });
+      }),
+    );
+    const account = await newAccount();
+    const r = await account.waitForIncoming({ fromBalance: 8_000, pollIntervalMs: 0 });
+    expect(r.balance).toBe(9_000);
+    // Exactly one balance call: the poll. No separate baseline fetch.
+    expect(calls).toBe(1);
+  });
+
+  it('invokes onPoll with each freshly-read balance', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${BASE}/api/balance`, () => {
+        calls += 1;
+        const balance = calls >= 2 ? 100 : 0;
+        return HttpResponse.json({ balance, num_sends: 0 });
+      }),
+    );
+    const account = await newAccount();
+    const seen: number[] = [];
+    await account.waitForIncoming({
+      fromBalance: 0,
+      pollIntervalMs: 0,
+      onPoll: (b) => seen.push(b.balance),
+    });
+    expect(seen).toEqual([0, 100]);
+  });
+
+  it('times out when no increase is observed', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 0, num_sends: 0 })),
+    );
+    const account = await newAccount();
+    await expect(
+      account.waitForIncoming({ fromBalance: 0, pollIntervalMs: 0, timeoutMs: 30 }),
+    ).rejects.toThrow(/timed out/);
+  });
+
+  it('rejects immediately when given an already-aborted signal', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 0, num_sends: 0 })),
+    );
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      account.waitForIncoming({ fromBalance: 0, signal: ctrl.signal }),
+    ).rejects.toThrow();
+  });
+
+  it('aborts when the signal fires during the poll delay', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 0, num_sends: 0 })),
+    );
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 10);
+    await expect(
+      account.waitForIncoming({ fromBalance: 0, pollIntervalMs: 50, signal: ctrl.signal }),
+    ).rejects.toThrow(/aborted/);
+  });
+});
+
 describe('ZkCoinsAccount.claimUsername / resolveUsername', () => {
   it('claimUsername signs a verifying Schnorr signature over sha256(claim message)', async () => {
     let body: { public_key: string; signature: string; timestamp: number } | null = null;

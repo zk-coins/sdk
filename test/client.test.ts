@@ -671,6 +671,296 @@ describe('ZkCoinsClient timeout + abort', () => {
   });
 });
 
+describe('ZkCoinsClient.root', () => {
+  const rootBody = {
+    service: 'zkcoins-node',
+    version: '1.1.0',
+    network: 'Mutinynet',
+    endpoints: {
+      info: 'GET  /api/info',
+      balance: 'GET  /api/balance?address={hex}',
+      history: 'GET  /api/history?address={hex}&limit={n}&offset={n}',
+      receive: 'POST /api/receive',
+      admit_mint: 'POST /api/jobs/mint',
+      admit_send: 'POST /api/jobs/send',
+      get_job: 'GET  /api/jobs/{job_id}',
+      stream_job: 'GET  /api/jobs/{job_id}/stream',
+      commit: 'POST /api/jobs/{job_id}/commit',
+      cancel: 'POST /api/jobs/{job_id}/cancel',
+      proof: 'GET  /api/proof/{id}',
+      inscription: 'GET  /api/inscriptions/{txid}',
+      username_resolve: 'GET  /api/username/resolve/{username}',
+      health: 'GET  /health',
+      health_ready: 'GET  /health/ready',
+      health_publisher: 'GET  /health/publisher',
+      openapi: 'GET  /openapi.json',
+      docs: 'GET  /docs',
+    },
+    docs: 'https://docs.zkcoins.app',
+  };
+
+  it('parses the service-info envelope', async () => {
+    server.use(http.get(`${BASE}/`, () => HttpResponse.json(rootBody)));
+    const r = await newClient().root();
+    expect(r.service).toBe('zkcoins-node');
+    expect(r.network).toBe('Mutinynet');
+    expect(r.endpoints.health_ready).toBe('GET  /health/ready');
+    expect(r.docs).toBe('https://docs.zkcoins.app');
+  });
+
+  it('throws ZodError when a required endpoints field is missing', async () => {
+    const { health_ready, ...incompleteEndpoints } = rootBody.endpoints;
+    void health_ready;
+    server.use(
+      http.get(`${BASE}/`, () =>
+        HttpResponse.json({ ...rootBody, endpoints: incompleteEndpoints }),
+      ),
+    );
+    await expect(newClient().root()).rejects.toThrow();
+  });
+});
+
+describe('ZkCoinsClient.health', () => {
+  it('returns the trimmed plain-text "ok" body', async () => {
+    server.use(http.get(`${BASE}/health`, () => new HttpResponse('ok\n', { status: 200 })));
+    expect(await newClient().health()).toBe('ok');
+  });
+
+  it('maps a non-2xx to ApiError with the raw body', async () => {
+    server.use(http.get(`${BASE}/health`, () => new HttpResponse('service down', { status: 502 })));
+    await expect(newClient().health()).rejects.toMatchObject({
+      status: 502,
+      serverError: 'service down',
+    });
+  });
+
+  it('honours an already-aborted signal', async () => {
+    server.use(http.get(`${BASE}/health`, () => new HttpResponse('ok', { status: 200 })));
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(newClient().health(ctrl.signal)).rejects.toThrow();
+  });
+
+  it('aborts mid-request when the caller cancels the signal', async () => {
+    server.use(
+      http.get(`${BASE}/health`, async () => {
+        await new Promise(() => {});
+        return new HttpResponse('ok', { status: 200 });
+      }),
+    );
+    const ctrl = new AbortController();
+    const promise = newClient().health(ctrl.signal);
+    setTimeout(() => ctrl.abort(), 10);
+    await expect(promise).rejects.toThrow();
+  });
+
+  it('aborts when the per-request timeout elapses', async () => {
+    server.use(
+      http.get(`${BASE}/health`, async () => {
+        await new Promise(() => {});
+        return new HttpResponse('ok', { status: 200 });
+      }),
+    );
+    const client = new ZkCoinsClient({ apiUrl: BASE, requestTimeoutMs: 30 });
+    await expect(client.health()).rejects.toThrow();
+  });
+});
+
+describe('ZkCoinsClient.ready', () => {
+  it('parses the 200 ready body', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, () =>
+        HttpResponse.json({ ready: true, failures: [], status: 'ready', prover: 'ready' }),
+      ),
+    );
+    const r = await newClient().ready();
+    expect(r.ready).toBe(true);
+    expect(r.failures).toEqual([]);
+    expect(r.prover).toBe('ready');
+  });
+
+  it('parses (does not throw on) the 503 not-ready body', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, () =>
+        HttpResponse.json(
+          { ready: false, failures: ['db', 'prover'], status: 'starting', prover: 'warming' },
+          { status: 503 },
+        ),
+      ),
+    );
+    const r = await newClient().ready();
+    expect(r.ready).toBe(false);
+    expect(r.failures).toEqual(['db', 'prover']);
+    expect(r.status).toBe('starting');
+  });
+
+  it('still throws ApiError on a non-503 failure (e.g. 500)', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, () => HttpResponse.json({ error: 'boom' }, { status: 500 })),
+    );
+    await expect(newClient().ready()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('throws ZodError when the body shape drifts', async () => {
+    server.use(http.get(`${BASE}/health/ready`, () => HttpResponse.json({ ready: 'yes' })));
+    await expect(newClient().ready()).rejects.toThrow();
+  });
+
+  it('honours an already-aborted signal', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, () =>
+        HttpResponse.json({ ready: true, failures: [], status: 'ready', prover: 'ready' }),
+      ),
+    );
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(newClient().ready(ctrl.signal)).rejects.toThrow();
+  });
+
+  it('aborts mid-request when the caller cancels the signal', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ ready: true, failures: [], status: 'ready', prover: 'ready' });
+      }),
+    );
+    const ctrl = new AbortController();
+    const promise = newClient().ready(ctrl.signal);
+    setTimeout(() => ctrl.abort(), 10);
+    await expect(promise).rejects.toThrow();
+  });
+
+  it('aborts when the per-request timeout elapses', async () => {
+    server.use(
+      http.get(`${BASE}/health/ready`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ ready: true, failures: [], status: 'ready', prover: 'ready' });
+      }),
+    );
+    const client = new ZkCoinsClient({ apiUrl: BASE, requestTimeoutMs: 30 });
+    await expect(client.ready()).rejects.toThrow();
+  });
+});
+
+describe('ZkCoinsClient.publisherHealth', () => {
+  it('parses the 200 publisher state', async () => {
+    server.use(
+      http.get(`${BASE}/health/publisher`, () =>
+        HttpResponse.json({ address: 'tb1pxyz', utxo_count: 1, total_sats: 992746 }),
+      ),
+    );
+    const r = await newClient().publisherHealth();
+    expect(r.address).toBe('tb1pxyz');
+    expect(r.utxo_count).toBe(1);
+    expect(r.total_sats).toBe(992746);
+  });
+
+  it('maps the 503 Esplora-error shape to ApiError', async () => {
+    server.use(
+      http.get(`${BASE}/health/publisher`, () =>
+        HttpResponse.json(
+          {
+            error: 'Esplora-side error fetching publisher UTXOs',
+            detail: 'timeout',
+            address: 'tb1p',
+          },
+          { status: 503 },
+        ),
+      ),
+    );
+    await expect(newClient().publisherHealth()).rejects.toMatchObject({
+      status: 503,
+      serverError: 'Esplora-side error fetching publisher UTXOs',
+    });
+  });
+});
+
+describe('ZkCoinsClient.addresses', () => {
+  it('parses the address list', async () => {
+    server.use(
+      http.get(`${BASE}/api/address`, () => HttpResponse.json({ addresses: ['0xaa', '0xbb'] })),
+    );
+    const r = await newClient().addresses();
+    expect(r.addresses).toEqual(['0xaa', '0xbb']);
+  });
+
+  it('maps a 404 (feature off) to ApiError', async () => {
+    server.use(http.get(`${BASE}/api/address`, () => new HttpResponse('', { status: 404 })));
+    await expect(newClient().addresses()).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe('ZkCoinsClient.inscription', () => {
+  it('URL-encodes the txid and parses the summary', async () => {
+    let observed = '';
+    server.use(
+      http.get(`${BASE}/api/inscriptions/:txid`, ({ params }) => {
+        observed = params.txid as string;
+        return HttpResponse.json({
+          commit_txid: 'ab'.repeat(32),
+          reveal_txid: 'cd'.repeat(32),
+          kind: 'mint',
+          status: 'confirmed',
+          commit_output_value: 600,
+          failure_reason: null,
+          created_at: '2026-06-03T00:00:00.000000Z',
+          updated_at: '2026-06-03T00:00:01.000000Z',
+        });
+      }),
+    );
+    const r = await newClient().inscription('ab'.repeat(32));
+    expect(observed).toBe('ab'.repeat(32));
+    expect(r.kind).toBe('mint');
+    expect(r.reveal_txid).toBe('cd'.repeat(32));
+    expect(r.failure_reason).toBeNull();
+  });
+
+  it('parses a failed inscription with a null reveal_txid', async () => {
+    server.use(
+      http.get(`${BASE}/api/inscriptions/:txid`, () =>
+        HttpResponse.json({
+          commit_txid: 'ef'.repeat(32),
+          reveal_txid: null,
+          kind: 'send',
+          status: 'failed',
+          commit_output_value: 0,
+          failure_reason: 'broadcast rejected',
+          created_at: '2026-06-03T00:00:00.000000Z',
+          updated_at: '2026-06-03T00:00:01.000000Z',
+        }),
+      ),
+    );
+    const r = await newClient().inscription('ef'.repeat(32));
+    expect(r.status).toBe('failed');
+    expect(r.reveal_txid).toBeNull();
+    expect(r.failure_reason).toBe('broadcast rejected');
+  });
+
+  it('maps a 422 (malformed txid) to ApiError', async () => {
+    server.use(
+      http.get(`${BASE}/api/inscriptions/:txid`, () =>
+        HttpResponse.json({ success: false, error: 'txid is not valid hex' }, { status: 422 }),
+      ),
+    );
+    await expect(newClient().inscription('zz')).rejects.toMatchObject({
+      status: 422,
+      serverError: 'txid is not valid hex',
+    });
+  });
+
+  it('maps a 404 (unknown txid) to ApiError', async () => {
+    server.use(
+      http.get(`${BASE}/api/inscriptions/:txid`, () =>
+        HttpResponse.json(
+          { success: false, error: 'No inscription found for this txid' },
+          { status: 404 },
+        ),
+      ),
+    );
+    await expect(newClient().inscription('aa'.repeat(32))).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
 describe('ZkCoinsClient: custom fetch injection', () => {
   it('uses a caller-supplied fetch when provided', async () => {
     const fakeFetch = vi.fn<typeof fetch>(async (input) => {

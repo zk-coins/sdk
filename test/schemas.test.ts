@@ -1,18 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AddressesResponseSchema,
   BalanceResponseSchema,
   BitcoinNetworkSchema,
   CapabilitiesSchema,
   ClaimUsernameResponseSchema,
   HistoryResponseSchema,
   InfoResponseSchema,
+  InscriptionKindSchema,
+  InscriptionSummarySchema,
   JobAcceptedSchema,
   JobKindSchema,
   JobResultSchema,
   JobStatusSchema,
   JobStatusValueSchema,
+  PublisherHealthResponseSchema,
+  ReadyResponseSchema,
   ResolveUsernameResponseSchema,
+  RootResponseSchema,
   TxItemSchema,
   UsernameResponseSchema,
 } from '../src/schemas.js';
@@ -353,5 +359,192 @@ describe('Jobs schemas', () => {
 
   it('JobStatusSchema rejects an unknown status (contract drift)', () => {
     expect(() => JobStatusSchema.parse({ status: 'paused', phase: 'x' })).toThrow();
+  });
+});
+
+describe('ReadyResponseSchema', () => {
+  it('parses a ready body', () => {
+    const r = ReadyResponseSchema.parse({
+      ready: true,
+      failures: [],
+      status: 'ready',
+      prover: 'ready',
+    });
+    expect(r.ready).toBe(true);
+    expect(r.failures).toEqual([]);
+  });
+
+  it('parses a not-ready body with failures', () => {
+    const r = ReadyResponseSchema.parse({
+      ready: false,
+      failures: ['db', 'esplora', 'prover'],
+      status: 'starting',
+      prover: 'warming',
+    });
+    expect(r.failures).toEqual(['db', 'esplora', 'prover']);
+    expect(r.prover).toBe('warming');
+  });
+
+  it('rejects a missing failures array', () => {
+    expect(() =>
+      ReadyResponseSchema.parse({ ready: true, status: 'ready', prover: 'ready' }),
+    ).toThrow();
+  });
+
+  it('rejects a non-boolean ready', () => {
+    expect(() =>
+      ReadyResponseSchema.parse({ ready: 'yes', failures: [], status: 'ready', prover: 'ready' }),
+    ).toThrow();
+  });
+});
+
+describe('PublisherHealthResponseSchema', () => {
+  it('parses the publisher wallet state', () => {
+    const r = PublisherHealthResponseSchema.parse({
+      address: 'tb1pl79',
+      utxo_count: 1,
+      total_sats: 992746,
+    });
+    expect(r.address).toBe('tb1pl79');
+    expect(r.utxo_count).toBe(1);
+    expect(r.total_sats).toBe(992746);
+  });
+
+  it('rejects a missing total_sats', () => {
+    expect(() => PublisherHealthResponseSchema.parse({ address: 'tb1p', utxo_count: 0 })).toThrow();
+  });
+});
+
+describe('RootResponseSchema', () => {
+  const endpoints = {
+    info: 'GET  /api/info',
+    balance: 'GET  /api/balance?address={hex}',
+    history: 'GET  /api/history',
+    receive: 'POST /api/receive',
+    admit_mint: 'POST /api/jobs/mint',
+    admit_send: 'POST /api/jobs/send',
+    get_job: 'GET  /api/jobs/{job_id}',
+    stream_job: 'GET  /api/jobs/{job_id}/stream',
+    commit: 'POST /api/jobs/{job_id}/commit',
+    cancel: 'POST /api/jobs/{job_id}/cancel',
+    proof: 'GET  /api/proof/{id}',
+    inscription: 'GET  /api/inscriptions/{txid}',
+    username_resolve: 'GET  /api/username/resolve/{username}',
+    health: 'GET  /health',
+    health_ready: 'GET  /health/ready',
+    health_publisher: 'GET  /health/publisher',
+    openapi: 'GET  /openapi.json',
+    docs: 'GET  /docs',
+  };
+
+  it('parses the service-info envelope', () => {
+    const r = RootResponseSchema.parse({
+      service: 'zkcoins-node',
+      version: '1.1.0',
+      network: 'Mutinynet',
+      endpoints,
+      docs: 'https://docs.zkcoins.app',
+    });
+    expect(r.service).toBe('zkcoins-node');
+    expect(r.endpoints.health_publisher).toBe('GET  /health/publisher');
+  });
+
+  it('rejects an endpoints map missing a required key', () => {
+    const { docs, ...incomplete } = endpoints;
+    void docs;
+    expect(() =>
+      RootResponseSchema.parse({
+        service: 'zkcoins-node',
+        version: '1.1.0',
+        network: 'Mutinynet',
+        endpoints: incomplete,
+        docs: 'https://docs.zkcoins.app',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('AddressesResponseSchema', () => {
+  it('parses an address list', () => {
+    expect(AddressesResponseSchema.parse({ addresses: ['0xaa', '0xbb'] }).addresses).toEqual([
+      '0xaa',
+      '0xbb',
+    ]);
+  });
+
+  it('parses an empty list', () => {
+    expect(AddressesResponseSchema.parse({ addresses: [] }).addresses).toEqual([]);
+  });
+
+  it('rejects a non-array addresses', () => {
+    expect(() => AddressesResponseSchema.parse({ addresses: 'nope' })).toThrow();
+  });
+});
+
+describe('InscriptionKindSchema + InscriptionSummarySchema', () => {
+  it('InscriptionKindSchema covers mint + send', () => {
+    expect(InscriptionKindSchema.parse('mint')).toBe('mint');
+    expect(InscriptionKindSchema.parse('send')).toBe('send');
+    expect(() => InscriptionKindSchema.parse('reveal')).toThrow();
+  });
+
+  it('parses a confirmed inscription summary', () => {
+    const r = InscriptionSummarySchema.parse({
+      commit_txid: 'ab'.repeat(32),
+      reveal_txid: 'cd'.repeat(32),
+      kind: 'mint',
+      status: 'confirmed',
+      commit_output_value: 600,
+      failure_reason: null,
+      created_at: '2026-06-03T00:00:00.000000Z',
+      updated_at: '2026-06-03T00:00:01.000000Z',
+    });
+    expect(r.kind).toBe('mint');
+    expect(r.reveal_txid).toBe('cd'.repeat(32));
+    expect(r.failure_reason).toBeNull();
+  });
+
+  it('parses a failed inscription with null reveal_txid + a failure_reason', () => {
+    const r = InscriptionSummarySchema.parse({
+      commit_txid: 'ef'.repeat(32),
+      reveal_txid: null,
+      kind: 'send',
+      status: 'failed',
+      commit_output_value: 0,
+      failure_reason: 'broadcast rejected',
+      created_at: '2026-06-03T00:00:00.000000Z',
+      updated_at: '2026-06-03T00:00:01.000000Z',
+    });
+    expect(r.reveal_txid).toBeNull();
+    expect(r.failure_reason).toBe('broadcast rejected');
+  });
+
+  it('rejects an omitted reveal_txid (node emits explicit null)', () => {
+    expect(() =>
+      InscriptionSummarySchema.parse({
+        commit_txid: 'ab'.repeat(32),
+        kind: 'mint',
+        status: 'confirmed',
+        commit_output_value: 600,
+        failure_reason: null,
+        created_at: '2026-06-03T00:00:00.000000Z',
+        updated_at: '2026-06-03T00:00:01.000000Z',
+      }),
+    ).toThrow();
+  });
+
+  it('rejects an unknown kind', () => {
+    expect(() =>
+      InscriptionSummarySchema.parse({
+        commit_txid: 'ab'.repeat(32),
+        reveal_txid: null,
+        kind: 'transfer',
+        status: 'confirmed',
+        commit_output_value: 600,
+        failure_reason: null,
+        created_at: '2026-06-03T00:00:00.000000Z',
+        updated_at: '2026-06-03T00:00:01.000000Z',
+      }),
+    ).toThrow();
   });
 });
