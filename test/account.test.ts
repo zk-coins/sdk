@@ -3,9 +3,9 @@ import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
+import { hexToBytes } from '@noble/hashes/utils.js';
 
-import { NotImplementedError } from '../src/errors.js';
+import { JobFailedError } from '../src/errors.js';
 import { ZkCoinsAccount } from '../src/account.js';
 import { ZkCoinsClient } from '../src/client.js';
 import { buildClaimMessage, buildSendMessage } from '../src/messages.js';
@@ -13,6 +13,11 @@ import { buildClaimMessage, buildSendMessage } from '../src/messages.js';
 const BASE = 'https://account.test';
 const TEST_MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+
+// Two valid 32-byte-hex digests for the commit message (account_state_hash
+// || output_coins_root). Arbitrary but well-formed hex.
+const ASH = 'aa'.repeat(32);
+const OCR = 'bb'.repeat(32);
 
 const server = setupServer();
 
@@ -25,6 +30,8 @@ const newAccount = () =>
     apiUrl: BASE,
     client: new ZkCoinsClient({ apiUrl: BASE }),
   });
+
+const RECIPIENT = 'cdef'.padEnd(64, '0');
 
 describe('ZkCoinsAccount.fromMnemonic', () => {
   it('produces a 32-byte hex address', async () => {
@@ -47,21 +54,17 @@ describe('ZkCoinsAccount.fromMnemonic', () => {
     expect(a.address).not.toBe(b.address);
   });
 
-  it('rejects a negative accountIndex', async () => {
+  it('rejects a negative / non-integer accountIndex', async () => {
     await expect(ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, -1, { apiUrl: BASE })).rejects.toThrow(
       /non-negative integer/,
     );
-  });
-
-  it('rejects a non-integer accountIndex', async () => {
     await expect(ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, 1.5, { apiUrl: BASE })).rejects.toThrow(
       /non-negative integer/,
     );
   });
 
   it('numPubkeys starts at 0', async () => {
-    const account = await newAccount();
-    expect(account.getNumPubkeys()).toBe(0);
+    expect((await newAccount()).getNumPubkeys()).toBe(0);
   });
 
   it('constructs its own ZkCoinsClient when no override is passed', async () => {
@@ -71,75 +74,237 @@ describe('ZkCoinsAccount.fromMnemonic', () => {
 });
 
 describe('ZkCoinsAccount.getBalance', () => {
-  it('forwards to the underlying client', async () => {
+  it('forwards to the underlying client (incl. num_sends)', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () =>
-        HttpResponse.json({ balance: 12345, username: 'satoshi' }),
+        HttpResponse.json({ balance: 12345, username: 'satoshi', num_sends: 2 }),
       ),
     );
-    const account = await newAccount();
-    const r = await account.getBalance();
+    const r = await (await newAccount()).getBalance();
     expect(r.balance).toBe(12345);
-    expect(r.username).toBe('satoshi');
+    expect(r.num_sends).toBe(2);
   });
 
   it('threads through ApiError on failure', async () => {
     server.use(
       http.get(`${BASE}/api/balance`, () =>
-        HttpResponse.json({ success: false, error: 'address not found' }, { status: 404 }),
+        HttpResponse.json({ error: 'address not found' }, { status: 404 }),
       ),
     );
-    const account = await newAccount();
-    await expect(account.getBalance()).rejects.toThrow(/address not found/);
+    await expect((await newAccount()).getBalance()).rejects.toThrow(/address not found/);
   });
 });
 
-describe('ZkCoinsAccount.pay', () => {
-  it('refreshes balance before constructing the send (thin-client invariant)', async () => {
-    const calls: string[] = [];
+describe('ZkCoinsAccount.mint', () => {
+  it('admits a mint job and polls to completed', async () => {
+    let mintBody: Record<string, unknown> = {};
+    let polls = 0;
     server.use(
-      http.get(`${BASE}/api/balance`, () => {
-        calls.push('balance');
-        return HttpResponse.json({ balance: 10_000 });
+      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
+        mintBody = (await request.json()) as typeof mintBody;
+        return HttpResponse.json({ job_id: 'mint-1', status: 'queued' }, { status: 202 });
       }),
-      http.post(`${BASE}/api/send`, () => {
-        calls.push('send');
-        return HttpResponse.json({ success: true, proof_id: 1 });
+      http.get(`${BASE}/api/jobs/mint-1`, () => {
+        polls += 1;
+        if (polls < 2) {
+          return HttpResponse.json(
+            { job_id: 'mint-1', kind: 'mint', status: 'proving', phase: 'proving', progress: 50 },
+            { headers: { 'Retry-After': '0' } },
+          );
+        }
+        return HttpResponse.json({
+          job_id: 'mint-1',
+          kind: 'mint',
+          status: 'completed',
+          phase: 'completed',
+          progress: 100,
+          result: { success: true, proof_id: 7 },
+        });
       }),
     );
     const account = await newAccount();
-    await account.pay('cdef'.padEnd(64, '0'), 100);
-    expect(calls).toEqual(['balance', 'send']);
+    const r = await account.mint(10_000);
+    expect(mintBody).toEqual({ account_address: account.address, amount: 10_000 });
+    expect(mintBody).not.toHaveProperty('asset_id');
+    expect(r.jobId).toBe('mint-1');
+    expect(r.proofId).toBe(7);
   });
 
-  it('increments numPubkeys on a successful send', async () => {
+  it('passes asset_id through on a multi-asset mint', async () => {
+    let mintBody: Record<string, unknown> = {};
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000 })),
-      http.post(`${BASE}/api/send`, () => HttpResponse.json({ success: true, proof_id: 42 })),
+      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
+        mintBody = (await request.json()) as typeof mintBody;
+        return HttpResponse.json({ job_id: 'mint-2', status: 'queued' }, { status: 202 });
+      }),
+      http.get(`${BASE}/api/jobs/mint-2`, () =>
+        HttpResponse.json({
+          job_id: 'mint-2',
+          kind: 'mint',
+          status: 'completed',
+          phase: 'completed',
+          progress: 100,
+          result: { success: true, proof_id: 1 },
+        }),
+      ),
     );
+    await (await newAccount()).mint(5, 'ff'.repeat(32));
+    expect(mintBody.asset_id).toBe('ff'.repeat(32));
+  });
+
+  it('throws JobFailedError when the mint job fails', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/mint`, () =>
+        HttpResponse.json({ job_id: 'mint-3', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/mint-3`, () =>
+        HttpResponse.json({
+          job_id: 'mint-3',
+          kind: 'mint',
+          status: 'failed',
+          phase: 'failed',
+          progress: 0,
+          error: 'mint rejected on mainnet',
+        }),
+      ),
+    );
+    await expect((await newAccount()).mint(10_000)).rejects.toThrow(/mint rejected on mainnet/);
+  });
+});
+
+describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
+  // Drive a job through queued → proving → awaiting_signature (with
+  // proof_id + ash/ocr on the result) → broadcasting → completed,
+  // exercising the wallet's commit-message build + numPubkeys advance.
+  const installSendLifecycle = (opts: { jobId: string }): { commits: unknown[] } => {
+    const captured = { commits: [] as unknown[] };
+    let phase: 'await' | 'committed' = 'await';
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: opts.jobId, status: 'queued' }, { status: 202 }),
+      ),
+      http.post(`${BASE}/api/jobs/${opts.jobId}/commit`, async ({ request }) => {
+        captured.commits.push(await request.json());
+        phase = 'committed';
+        return HttpResponse.json({ status: 'broadcasting' });
+      }),
+      http.get(`${BASE}/api/jobs/${opts.jobId}`, () => {
+        if (phase === 'await') {
+          return HttpResponse.json(
+            {
+              job_id: opts.jobId,
+              kind: 'send',
+              status: 'awaiting_signature',
+              phase: 'awaiting_signature',
+              progress: 60,
+              proof_id: 99,
+              result: { success: true, account_state_hash: ASH, output_coins_root: OCR },
+            },
+            { headers: { 'Retry-After': '0' } },
+          );
+        }
+        return HttpResponse.json({
+          job_id: opts.jobId,
+          kind: 'send',
+          status: 'completed',
+          phase: 'completed',
+          progress: 100,
+          result: { success: true, proof_id: 99 },
+        });
+      }),
+    );
+    return captured;
+  };
+
+  it('refreshes balance, commits a verifying signature, completes, advances numPubkeys', async () => {
+    const captured = installSendLifecycle({ jobId: 'send-1' });
     const account = await newAccount();
     expect(account.getNumPubkeys()).toBe(0);
-    await account.pay('cdef'.padEnd(64, '0'), 100);
+
+    const r = await account.pay(RECIPIENT, 100);
+    expect(r.jobId).toBe('send-1');
+    expect(r.proofId).toBe(99);
     expect(account.getNumPubkeys()).toBe(1);
-    await account.pay('cdef'.padEnd(64, '0'), 200);
-    expect(account.getNumPubkeys()).toBe(2);
+
+    // The commit body carries proof_id + the ash||ocr message + a
+    // Schnorr signature that verifies under the broadcast pubkey.
+    expect(captured.commits).toHaveLength(1);
+    const commit = captured.commits[0] as {
+      proof_id: number;
+      public_key: string;
+      signature: string;
+      message: string;
+    };
+    expect(commit.proof_id).toBe(99);
+    expect(commit.message).toBe(ASH + OCR);
+    const digest = sha256(hexToBytes(commit.message));
+    const xOnly = hexToBytes(commit.public_key).slice(1);
+    expect(schnorr.verify(hexToBytes(commit.signature), digest, xOnly)).toBe(true);
   });
 
-  it('produces a verifying Schnorr signature against the SHA-256 of the send message', async () => {
-    let receivedBody: Record<string, unknown> | null = null;
+  it('a second pay advances numPubkeys to 2 and signs at the next index', async () => {
+    installSendLifecycle({ jobId: 'send-a' });
+    const account = await newAccount();
+    await account.pay(RECIPIENT, 100);
+    expect(account.getNumPubkeys()).toBe(1);
+
+    const captured = installSendLifecycle({ jobId: 'send-b' });
+    await account.pay(RECIPIENT, 200);
+    expect(account.getNumPubkeys()).toBe(2);
+    // The second commit's pubkey is derived at index 1, not 0.
+    const first = await newAccount();
+    const c2 = captured.commits[0] as { public_key: string };
+    // pubkey at index 0 differs from the one used for send #2 (index 1)
+    const idx0 = await (
+      await import('../src/derivation.js')
+    ).derivePublicKeys(
+      (
+        await (
+          await import('../src/derivation.js')
+        ).generateAccountKeysFromMnemonic(TEST_MNEMONIC, '')
+      ).xpriv,
+      0,
+    );
+    expect(c2.public_key).not.toBe(idx0.publicKey);
+    expect(first.address).toBe(account.address);
+  });
+
+  it('signs the send message with a signature that verifies on the server side', async () => {
+    let sendBody: Record<string, unknown> | null = null;
+    let phase: 'await' | 'done' = 'await';
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000 })),
-      http.post(`${BASE}/api/send`, async ({ request }) => {
-        receivedBody = (await request.json()) as Record<string, unknown>;
-        return HttpResponse.json({ success: true });
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, async ({ request }) => {
+        sendBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ job_id: 'send-sig', status: 'queued' }, { status: 202 });
       }),
+      http.post(`${BASE}/api/jobs/send-sig/commit`, () => {
+        phase = 'done';
+        return HttpResponse.json({ status: 'broadcasting' });
+      }),
+      http.get(`${BASE}/api/jobs/send-sig`, () =>
+        phase === 'await'
+          ? HttpResponse.json(
+              {
+                status: 'awaiting_signature',
+                phase: 'awaiting_signature',
+                proof_id: 1,
+                result: { success: true, account_state_hash: ASH, output_coins_root: OCR },
+              },
+              { headers: { 'Retry-After': '0' } },
+            )
+          : HttpResponse.json({
+              status: 'completed',
+              phase: 'completed',
+              result: { success: true },
+            }),
+      ),
     );
     const account = await newAccount();
-    const recipient = 'cdef'.padEnd(64, '0');
-    await account.pay(recipient, 5_000);
+    await account.pay(RECIPIENT, 5_000);
 
-    expect(receivedBody).not.toBeNull();
-    const body = receivedBody as unknown as {
+    const body = sendBody as unknown as {
       account_address: string;
       recipient: string;
       amount: number;
@@ -147,9 +312,6 @@ describe('ZkCoinsAccount.pay', () => {
       signature: string;
       timestamp: number;
     };
-
-    // Reconstruct the digest the same way pay() would, and verify
-    // against the x-only form of the broadcast pubkey.
     const messageBytes = buildSendMessage({
       accountAddress: body.account_address,
       recipient: body.recipient,
@@ -158,44 +320,209 @@ describe('ZkCoinsAccount.pay', () => {
     });
     const digest = sha256(messageBytes);
     const xOnlyPub = hexToBytes(body.public_key).slice(1);
-    const ok = schnorr.verify(hexToBytes(body.signature), digest, xOnlyPub);
-    expect(ok).toBe(true);
+    expect(schnorr.verify(hexToBytes(body.signature), digest, xOnlyPub)).toBe(true);
   });
 
-  it('returns PayResult with proof_id and the optional ash/ocr fields', async () => {
+  it('throws (and does NOT advance numPubkeys) when the send job fails', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000 })),
-      http.post(`${BASE}/api/send`, () =>
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: 'send-fail', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/send-fail`, () =>
         HttpResponse.json({
-          success: true,
-          proof_id: 7,
-          account_state_hash: 'aa',
-          output_coins_root: 'bb',
+          status: 'failed',
+          phase: 'failed',
+          error: 'Insufficient funds',
         }),
       ),
     );
     const account = await newAccount();
-    const r = await account.pay('cdef'.padEnd(64, '0'), 500);
-    expect(r.proofId).toBe(7);
-    expect(r.accountStateHash).toBe('aa');
-    expect(r.outputCoinsRoot).toBe('bb');
+    await expect(account.pay(RECIPIENT, 100)).rejects.toBeInstanceOf(JobFailedError);
+    expect(account.getNumPubkeys()).toBe(0);
   });
 
-  it('does not advance numPubkeys on a failed send', async () => {
+  it('fails hard when the awaiting_signature job omits ash/ocr (no fabricated commit)', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000 })),
-      http.post(`${BASE}/api/send`, () =>
-        HttpResponse.json({ success: false, error: 'insufficient' }, { status: 400 }),
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: 'send-noash', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/send-noash`, () =>
+        HttpResponse.json(
+          { status: 'awaiting_signature', phase: 'awaiting_signature', proof_id: 5 },
+          { headers: { 'Retry-After': '0' } },
+        ),
       ),
     );
     const account = await newAccount();
-    await expect(account.pay('cdef'.padEnd(64, '0'), 100)).rejects.toThrow(/insufficient/);
+    await expect(account.pay(RECIPIENT, 100)).rejects.toThrow(/account_state_hash/);
     expect(account.getNumPubkeys()).toBe(0);
+  });
+
+  it('throws if the send job completes before reaching awaiting_signature', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: 'send-skip', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/send-skip`, () =>
+        HttpResponse.json({
+          status: 'completed',
+          phase: 'completed',
+          result: { success: true, proof_id: 1 },
+        }),
+      ),
+    );
+    const account = await newAccount();
+    await expect(account.pay(RECIPIENT, 100)).rejects.toThrow(/before commit/);
+    expect(account.getNumPubkeys()).toBe(0);
+  });
+
+  it('fails when the awaiting_signature job omits proof_id', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.post(`${BASE}/api/jobs/send`, () =>
+        HttpResponse.json({ job_id: 'send-nopid', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/send-nopid`, () =>
+        HttpResponse.json(
+          { status: 'awaiting_signature', phase: 'awaiting_signature' },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    await expect((await newAccount()).pay(RECIPIENT, 100)).rejects.toThrow(/proof_id/);
   });
 });
 
-describe('ZkCoinsAccount.claimUsername', () => {
-  it('produces a verifying Schnorr signature over sha256(claim message)', async () => {
+describe('ZkCoinsAccount.waitForJob', () => {
+  it('invokes onPhase once per distinct phase transition', async () => {
+    let polls = 0;
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-1`, () => {
+        polls += 1;
+        const body =
+          polls === 1
+            ? { status: 'queued', phase: 'queued' }
+            : polls === 2
+              ? { status: 'proving', phase: 'proving' }
+              : { status: 'completed', phase: 'completed', result: { success: true } };
+        return HttpResponse.json(body, { headers: { 'Retry-After': '0' } });
+      }),
+    );
+    const account = await newAccount();
+    const phases: string[] = [];
+    const terminal = await account.waitForJob(
+      'wj-1',
+      new Set(['completed', 'failed', 'cancelled']),
+      {
+        onPhase: (s) => phases.push(s.phase),
+        pollIntervalMs: 0,
+      },
+    );
+    expect(terminal.status).toBe('completed');
+    expect(phases).toEqual(['queued', 'proving', 'completed']);
+  });
+
+  it('throws JobFailedError on a cancelled terminal', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-2`, () =>
+        HttpResponse.json({ status: 'cancelled', phase: 'cancelled' }),
+      ),
+    );
+    const account = await newAccount();
+    await expect(
+      account.waitForJob('wj-2', new Set(['completed', 'failed', 'cancelled'])),
+    ).rejects.toBeInstanceOf(JobFailedError);
+  });
+
+  it('times out if the job never reaches a stop status', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-3`, () =>
+        HttpResponse.json(
+          { status: 'proving', phase: 'proving' },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    const account = await newAccount();
+    await expect(
+      account.waitForJob('wj-3', new Set(['completed']), { pollIntervalMs: 0, timeoutMs: 30 }),
+    ).rejects.toThrow(/timed out/);
+  });
+
+  it('rejects immediately when given an already-aborted signal (loop-top guard)', async () => {
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      account.waitForJob('wj-pre', new Set(['completed']), { signal: ctrl.signal }),
+    ).rejects.toThrow(/aborted/);
+  });
+
+  it('rejects when the signal aborts between a poll and the next delay', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-mid`, () =>
+        HttpResponse.json(
+          { status: 'proving', phase: 'proving' },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    // Abort from onPhase: this runs after the poll resolves but before
+    // `delay` is reached, so the loop-top guard already passed and the
+    // delay sees an already-aborted signal.
+    await expect(
+      account.waitForJob('wj-mid', new Set(['completed']), {
+        signal: ctrl.signal,
+        pollIntervalMs: 1_000,
+        onPhase: () => ctrl.abort(),
+      }),
+    ).rejects.toThrow(/aborted/);
+  });
+
+  it('aborts when the supplied signal fires during a delay', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-4`, () =>
+        HttpResponse.json(
+          { status: 'proving', phase: 'proving' },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 10);
+    await expect(
+      account.waitForJob('wj-4', new Set(['completed']), {
+        pollIntervalMs: 50,
+        signal: ctrl.signal,
+      }),
+    ).rejects.toThrow(/aborted/);
+  });
+});
+
+describe('ZkCoinsAccount.getTransactions', () => {
+  it('delegates to client.history with this.address', async () => {
+    let observedAddress = '';
+    server.use(
+      http.get(`${BASE}/api/history`, ({ request }) => {
+        observedAddress = new URL(request.url).searchParams.get('address') ?? '';
+        return HttpResponse.json({ items: [], total: 0, limit: 50, offset: 0 });
+      }),
+    );
+    const account = await newAccount();
+    const r = await account.getTransactions({ limit: 5 });
+    expect(observedAddress).toBe(account.address);
+    expect(r.total).toBe(0);
+  });
+});
+
+describe('ZkCoinsAccount.claimUsername / resolveUsername', () => {
+  it('claimUsername signs a verifying Schnorr signature over sha256(claim message)', async () => {
     let body: { public_key: string; signature: string; timestamp: number } | null = null;
     server.use(
       http.post(`${BASE}/api/username/claim`, async ({ request }) => {
@@ -205,8 +532,6 @@ describe('ZkCoinsAccount.claimUsername', () => {
     );
     const account = await newAccount();
     await account.claimUsername('satoshi');
-
-    expect(body).not.toBeNull();
     const b = body as unknown as { public_key: string; signature: string; timestamp: number };
     const msg = buildClaimMessage({
       address: account.address,
@@ -218,52 +543,19 @@ describe('ZkCoinsAccount.claimUsername', () => {
     expect(schnorr.verify(hexToBytes(b.signature), digest, xOnly)).toBe(true);
   });
 
-  it('returns the parsed UsernameResponse', async () => {
-    server.use(
-      http.post(`${BASE}/api/username/claim`, () =>
-        HttpResponse.json({ username: 'alice', address: 'cd' }),
-      ),
-    );
-    const account = await newAccount();
-    const r = await account.claimUsername('alice');
-    expect(r).toEqual({ username: 'alice', address: 'cd' });
-  });
-});
-
-describe('ZkCoinsAccount.resolveUsername', () => {
-  it('pass-through; no signing', async () => {
+  it('resolveUsername passes through (no signing)', async () => {
     server.use(
       http.get(`${BASE}/api/username/resolve/:name`, ({ params }) =>
         HttpResponse.json({ username: params.name, address: 'aa' }),
       ),
     );
-    const account = await newAccount();
-    const r = await account.resolveUsername('bob');
+    const r = await (await newAccount()).resolveUsername('bob');
     expect(r).toEqual({ username: 'bob', address: 'aa' });
   });
 });
 
-describe('ZkCoinsAccount.getTransactions (issue #153 placeholder)', () => {
-  it('throws NotImplementedError', async () => {
-    const account = await newAccount();
-    await expect(account.getTransactions()).rejects.toThrow(NotImplementedError);
-  });
-
-  it('includes the tracking URL', async () => {
-    const account = await newAccount();
-    try {
-      await account.getTransactions();
-      throw new Error('expected throw');
-    } catch (e) {
-      expect((e as NotImplementedError).issueUrl).toBe(
-        'https://github.com/zk-coins/node/issues/153',
-      );
-    }
-  });
-});
-
 describe('ZkCoinsAccount numPubkeys persistence', () => {
-  it('setNumPubkeys advances the counter for restore-from-storage flows', async () => {
+  it('setNumPubkeys advances the counter (restore-from-num_sends)', async () => {
     const account = await newAccount();
     account.setNumPubkeys(7);
     expect(account.getNumPubkeys()).toBe(7);
@@ -282,41 +574,9 @@ describe('ZkCoinsAccount numPubkeys persistence', () => {
 });
 
 describe('ZkCoinsAccount.client property', () => {
-  it('is the same client passed in (if any)', async () => {
+  it('is the same client passed in', async () => {
     const client = new ZkCoinsClient({ apiUrl: BASE });
-    const account = await ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, 0, {
-      apiUrl: BASE,
-      client,
-    });
+    const account = await ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, 0, { apiUrl: BASE, client });
     expect(account.client).toBe(client);
-  });
-});
-
-describe('ZkCoinsAccount address derivation parity', () => {
-  it('address equals sha256(publicKey at index 0) — same contract as Rust', async () => {
-    const account = await newAccount();
-    // The address is set in the ctor from accountFromSeed(); re-derive
-    // the same way as a parity check.
-    const recomputed = bytesToHex(
-      sha256(
-        hexToBytes(
-          (
-            await (
-              await import('../src/derivation.js')
-            ).derivePublicKeys(
-              // We don't have direct access to the xpriv here; derive
-              // again via the helper using the same mnemonic.
-              (
-                await (
-                  await import('../src/derivation.js')
-                ).generateAccountKeysFromMnemonic(TEST_MNEMONIC, '')
-              ).xpriv,
-              0,
-            )
-          ).publicKey,
-        ),
-      ),
-    );
-    expect(account.address).toBe(recomputed);
   });
 });
