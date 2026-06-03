@@ -304,6 +304,21 @@ describe('Jobs schemas', () => {
     expect(JobResultSchema.parse({ success: true, proof_id: null }).proof_id).toBeNull();
   });
 
+  it('JobResultSchema parses an awaiting_signature result that omits success (node #195)', () => {
+    // The dispatcher writes only the two hex digests onto an
+    // awaiting_signature send job's result — no `success` field (see
+    // `job_dispatcher.rs::set_awaiting_signature`). Parsing `success` as
+    // required rejected every real awaiting_signature poll and stalled
+    // the wallet's send lifecycle. `success` is therefore optional.
+    const r = JobResultSchema.parse({
+      account_state_hash: 'a7448551f974b3f9',
+      output_coins_root: 'def0',
+    });
+    expect(r.success).toBeUndefined();
+    expect(r.account_state_hash).toBe('a7448551f974b3f9');
+    expect(r.output_coins_root).toBe('def0');
+  });
+
   it('JobStatusSchema parses a poll body (job_id, kind, progress present; optionals elided)', () => {
     const r = JobStatusSchema.parse({
       job_id: 'uuid-1',

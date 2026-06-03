@@ -4,6 +4,19 @@ All notable changes to `@zkcoins/sdk` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.1]
+
+### Fixed
+
+- **`JobResultSchema.success` is now optional.** The node's
+  `awaiting_signature` send-job result (node #195) carries only
+  `account_state_hash` / `output_coins_root` and **omits `success`** (see
+  `job_dispatcher.rs::set_awaiting_signature`). Parsing `success` as
+  required threw a `ZodError` on every real `awaiting_signature` poll,
+  which stalled `ZkCoinsAccount.pay()` in the proving/awaiting phase and
+  blocked the send lifecycle end-to-end. Verified against a live local
+  node (Mutinynet) with #195 — `pay()` now completes the two-phase send.
+
 ## [0.3.0]
 
 Endpoint-coverage completion. The SDK now mirrors **every** node

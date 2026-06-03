@@ -226,18 +226,33 @@ export const JobAcceptedSchema = z.object({
 export type JobAccepted = z.infer<typeof JobAcceptedSchema>;
 
 /**
- * Terminal `result` payload of a completed mint/send job — the JSON
- * body `flow::{mint_flow,commit_flow}` returns, surfaced verbatim on
- * the job row's `result` once `status = completed`. Same shape the
- * pre-Jobs-API synchronous `/api/{mint,send,commit}` endpoints
- * returned: `{success, proof_id?, account_state_hash?, output_coins_root?}`.
+ * `result` payload carried on a job row in two distinct states:
  *
- * Parsed strictly (rather than left as `unknown`) so a consumer reading
- * `result` of a completed job gets a typed `proof_id` /
- * `account_state_hash` / `output_coins_root` without a second cast.
+ *  - **`completed`** mint/send — the JSON body `flow::{mint_flow,
+ *    commit_flow}` returns: `{success: true, proof_id, account_state_hash,
+ *    output_coins_root}` (`router.rs` / `flow.rs`).
+ *  - **`awaiting_signature`** send (node #195) — the dispatcher writes
+ *    `{account_state_hash, output_coins_root}` so a pure-TS wallet can
+ *    build the commitment from JSON instead of decoding the binary
+ *    `CoinProof`. This payload **omits `success`** (see
+ *    `job_dispatcher.rs` `set_awaiting_signature` — the `serde_json::json!`
+ *    object has only the two hex digests).
+ *
+ * `success` is therefore `.optional()`: it is present on the completed
+ * result and absent on the awaiting_signature result. Parsing it as
+ * required rejected every real `awaiting_signature` poll with a
+ * `ZodError` and stalled the wallet's send lifecycle in `proving` /
+ * `queued` (the awaiting_signature frame never parsed) — the SDK never
+ * saw a node that carried the hashes until #195 shipped, so the gap was
+ * latent. The other three fields stay `.optional()` for the same
+ * per-state reason.
+ *
+ * Parsed (rather than left as `unknown`) so a consumer reading `result`
+ * gets a typed `proof_id` / `account_state_hash` / `output_coins_root`
+ * without a second cast.
  */
 export const JobResultSchema = z.object({
-  success: z.boolean(),
+  success: z.boolean().optional(),
   proof_id: z.number().nullable().optional(),
   account_state_hash: z.string().optional(),
   output_coins_root: z.string().optional(),

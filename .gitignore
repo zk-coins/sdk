@@ -37,3 +37,6 @@ yarn-error.log*
 
 # Generated docs (none today, future-proofing)
 docs/api/
+
+# npm pack artifacts
+*.tgz
