@@ -1,27 +1,28 @@
 /**
  * Typed errors thrown by the SDK.
  *
- * Two flavours:
- *
- * - `ApiError` — the server returned a non-2xx with the structured
- *   failure envelope (`{success: false, error: "<string>"}` from
- *   `zk-coins/node::router::*`). Consumers catch on this class to
- *   distinguish server-side rejections from network errors or
- *   client-side validation failures.
- * - `NotImplementedError` — placeholder thrown by SDK methods whose
- *   underlying endpoint has not shipped yet (today: `getTransactions`
- *   pending on zk-coins/node issue #153). Distinct from `ApiError`
- *   so consumer code can hide the affected UI path until the gate
- *   lifts, rather than rendering a generic network error.
+ * - `ApiError` — the server returned a non-2xx. `serverError` is the
+ *   parsed `error` string from the failure envelope (the Jobs-API
+ *   `{error}` shape or the legacy `{success: false, error}` shape)
+ *   when the body was JSON in either form; otherwise the raw body.
+ *   Consumers catch on this class to distinguish server-side
+ *   rejections from network errors or client-side validation failures.
+ * - `JobFailedError` — a background job reached a terminal non-success
+ *   state (`failed` or `cancelled`). Distinct from `ApiError` (the
+ *   HTTP call itself succeeded — the *job* failed) so consumer code can
+ *   branch on "the node rejected my request" vs. "the proof/broadcast
+ *   leg failed asynchronously". No silent fallback: `waitForJob`
+ *   throws this rather than returning a non-completed status.
  */
 
 /**
  * Thrown when the server responded with a non-2xx status.
  *
- * `serverError` is the parsed `error` string from the structured
- * failure envelope (`{success: false, error}`) when the body was
- * JSON in that shape; otherwise it falls back to the raw body. The
- * raw body is also retained on `rawBody` for diagnostics.
+ * `serverError` is the parsed `error` string from the failure envelope
+ * (the Jobs-API `{error}` shape or the legacy `{success: false, error}`
+ * shape) when the body was JSON in either form; otherwise it falls back
+ * to the raw body. The raw body is also retained on `rawBody` for
+ * diagnostics.
  */
 export class ApiError extends Error {
   public readonly status: number;
@@ -42,30 +43,25 @@ export class ApiError extends Error {
 }
 
 /**
- * Tracking URL for the `/api/history` endpoint pending in
- * `zk-coins/node`. Centralised here so the throw sites in
- * `client.ts::history()` and `account.ts::getTransactions()` share
- * a single source of truth — and the URL changes in one place if
- * the issue ever migrates.
+ * Thrown when a background job reaches a terminal non-success state.
+ *
+ * `waitForJob` / `mint` / `pay` throw this when a job ends in `failed`
+ * (the prove or broadcast leg errored — `error` carries the node's
+ * message) or `cancelled`. The terminal `status` is preserved so the
+ * caller can branch on it; `jobId` identifies the job for follow-up.
  */
-export const HISTORY_TRACKING_URL = 'https://github.com/zk-coins/node/issues/153';
+export class JobFailedError extends Error {
+  public readonly jobId: string;
+  public readonly status: 'failed' | 'cancelled';
+  public readonly serverError: string | undefined;
 
-/**
- * Thrown when an SDK method is called against a server-side endpoint
- * that has not shipped yet. Today: `ZkCoinsClient.history(...)` and
- * `ZkCoinsAccount.getTransactions(...)` while zk-coins/node #153 is
- * open.
- */
-export class NotImplementedError extends Error {
-  public readonly endpoint: string;
-  public readonly issueUrl: string | undefined;
-
-  constructor(endpoint: string, issueUrl?: string) {
-    const tail = issueUrl ? ` (tracking: ${issueUrl})` : '';
-    super(`zkCoins SDK: ${endpoint} is not implemented yet${tail}`);
-    this.name = 'NotImplementedError';
-    this.endpoint = endpoint;
-    this.issueUrl = issueUrl;
+  constructor(jobId: string, status: 'failed' | 'cancelled', serverError?: string) {
+    const tail = serverError ? `: ${serverError}` : '';
+    super(`zkCoins job ${jobId} ${status}${tail}`);
+    this.name = 'JobFailedError';
+    this.jobId = jobId;
+    this.status = status;
+    this.serverError = serverError;
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

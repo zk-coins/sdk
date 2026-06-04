@@ -7,7 +7,7 @@
  * the primitives — derivation, signing, message construction, REST
  * client — into a small `InterfaceAccountBasedWallet`-style API:
  *
- *   fromMnemonic → getBalance → pay → ... → claimUsername → ...
+ *   fromMnemonic → getBalance → mint → pay → getTransactions → claimUsername → ...
  *
  * The class deliberately holds **only the minimum state** needed
  * across calls: the derived `xpriv`, the current `numPubkeys`
@@ -25,39 +25,43 @@
  * wallet has to maintain: a monotonic counter incremented after each
  * successful send, so the next outgoing pubkey is unique. It is
  * deterministic given the account's send history, so a wallet that
- * loses its local copy can in principle reconstruct by scanning
- * usage — but the SDK does not implement that recovery path. If a
- * higher-level integrator needs to restore state, it should persist
- * `numPubkeys` alongside the mnemonic.
+ * loses its local copy can re-hydrate it from `balance().num_sends`.
  */
 
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 
-import { ZkCoinsClient, type SignedClaimRequest, type SignedSendRequest } from './client.js';
+import {
+  ZkCoinsClient,
+  newIdempotencyKey,
+  type CommitRequest,
+  type HistoryOpts,
+  type JobStatusWithRetry,
+  type SignedClaimRequest,
+  type SignedSendRequest,
+} from './client.js';
 import {
   derivePublicKeys,
   deriveSigningKey,
   generateAccountKeysFromMnemonic,
 } from './derivation.js';
-import { HISTORY_TRACKING_URL, NotImplementedError } from './errors.js';
+import { JobFailedError } from './errors.js';
 import { buildClaimMessage, buildSendMessage } from './messages.js';
 import type {
   BalanceResponse,
   HistoryResponse,
+  JobStatus,
   ResolveUsernameResponse,
-  SendResponse,
   UsernameResponse,
 } from './schemas.js';
-import { signSchnorr } from './signing.js';
+import { createCommitment, signSchnorr } from './signing.js';
 
 export interface ZkCoinsAccountOptions {
   /**
    * Base URL of the zkCoins node. Resolution order (handled inside
    * `ZkCoinsClient`):
    *   1. this option (programmatic override)
-   *   2. `ZKCOINS_API_URL` env var
-   *   3. `API_URL` constant in `./config.ts`
+   *   2. `API_URL` constant in `./config.ts`
    *
    * Ignored when `client` is also passed (the override's `apiUrl`
    * wins). Both options exist so simple call sites pass `apiUrl` and
@@ -70,19 +74,61 @@ export interface ZkCoinsAccountOptions {
   client?: ZkCoinsClient;
 }
 
-export interface PayResult {
-  /** Server-issued proof id, available on a successful send. */
+/** Result of a completed mint job. */
+export interface MintResult {
+  /** The job id, for follow-up / audit. */
+  jobId: string;
+  /** Server-issued proof id, if the completed mint reported one. */
   proofId: number | null | undefined;
-  /** Server-returned account_state_hash, if present. */
-  accountStateHash: string | undefined;
-  /** Server-returned output_coins_root, if present. */
-  outputCoinsRoot: string | undefined;
 }
 
-export interface HistoryOpts {
-  limit?: number;
-  offset?: number;
+/** Result of a completed send (`pay`) job. */
+export interface PayResult {
+  /** The send job id. */
+  jobId: string;
+  /** Server-issued proof id for the send. */
+  proofId: number;
 }
+
+/** Knobs for `waitForJob`'s poll loop. */
+export interface WaitForJobOpts {
+  /** Invoked on each distinct phase transition observed. */
+  onPhase?: (status: JobStatus) => void;
+  /** Floor poll interval when the node omits a `Retry-After`. Default 1500ms. */
+  pollIntervalMs?: number;
+  /** Hard timeout for the whole wait. Default 180_000ms (3 min). */
+  timeoutMs?: number;
+  /** Abort the wait early. */
+  signal?: AbortSignal;
+}
+
+/** Knobs for `waitForIncoming`'s balance-polling loop. */
+export interface WaitForIncomingOpts {
+  /**
+   * Balance (in sats) below which the helper keeps waiting. Defaults to
+   * the balance read at the moment `waitForIncoming` is called, so the
+   * helper resolves on the first observed *increase*. Pass an explicit
+   * value to wait until the balance reaches a known target instead.
+   */
+  fromBalance?: number;
+  /** Poll interval in ms. Default 5000. */
+  pollIntervalMs?: number;
+  /** Hard timeout for the whole wait. Default 300_000ms (5 min). */
+  timeoutMs?: number;
+  /** Invoked on each poll with the freshly-read balance. */
+  onPoll?: (balance: BalanceResponse) => void;
+  /** Abort the wait early. */
+  signal?: AbortSignal;
+}
+
+/** A `waitForJob` target — one or more non-terminal statuses to stop at, plus the terminal set. */
+type StopStatus = JobStatus['status'];
+
+const DEFAULT_POLL_INTERVAL_MS = 1_500;
+const DEFAULT_WAIT_TIMEOUT_MS = 180_000;
+const DEFAULT_INCOMING_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_INCOMING_TIMEOUT_MS = 300_000;
+const TERMINAL_STATUSES: ReadonlySet<StopStatus> = new Set(['completed', 'failed', 'cancelled']);
 
 export class ZkCoinsAccount {
   /** Hex-encoded account address (sha256 of publicKey at index 0). */
@@ -113,10 +159,6 @@ export class ZkCoinsAccount {
     accountIndex: number,
     opts: ZkCoinsAccountOptions = {},
   ): Promise<ZkCoinsAccount> {
-    // Today the derivation does not branch on accountIndex; future
-    // multi-account support would extend the BIP-32 path here. The
-    // parameter is consumed (referenced) so it shows up in stack
-    // traces / logs if the integrator passes something unusual.
     if (!Number.isInteger(accountIndex) || accountIndex < 0) {
       throw new Error(
         `ZkCoinsAccount.fromMnemonic: accountIndex must be a non-negative integer, got ${accountIndex}`,
@@ -125,7 +167,7 @@ export class ZkCoinsAccount {
 
     const keys = await generateAccountKeysFromMnemonic(mnemonic, opts.passphrase ?? '');
     // Pass `apiUrl` only when set so `exactOptionalPropertyTypes` is
-    // satisfied; ZkCoinsClient runs its own resolution (option → env →
+    // satisfied; ZkCoinsClient runs its own resolution (option →
     // config) when the option is absent.
     const client = opts.client ?? new ZkCoinsClient(opts.apiUrl ? { apiUrl: opts.apiUrl } : {});
 
@@ -142,34 +184,70 @@ export class ZkCoinsAccount {
   }
 
   /**
+   * Mint `amountSats` to this account (DEV faucet / authorised
+   * issuance). A mint is fully server-mediated — no wallet signature
+   * step — so the flow is admit → poll to `completed`.
+   *
+   * @param assetId optional 32-byte-hex multi-asset selector; omit for
+   *   the native asset.
+   */
+  async mint(amountSats: number, assetId?: string): Promise<MintResult> {
+    const idempotencyKey = newIdempotencyKey();
+    const accepted = await this.client.mintJob(
+      {
+        account_address: this.address,
+        amount: amountSats,
+        ...(assetId !== undefined ? { asset_id: assetId } : {}),
+      },
+      idempotencyKey,
+    );
+    const terminal = await this.waitForJob(accepted.job_id, TERMINAL_STATUSES);
+    // `waitForJob` throws on failed/cancelled, so reaching here means
+    // `completed`.
+    return {
+      jobId: accepted.job_id,
+      proofId: terminal.result?.proof_id,
+    };
+  }
+
+  /**
    * Send `amountSats` to `recipient`.
    *
    * Steps (all server-mediated):
    *
-   *   1. Refresh balance from the server — the thin-client invariant.
-   *      The server is authoritative; never sign against stale local
-   *      state.
+   *   1. Refresh balance from the server — the thin-client invariant —
+   *      and hydrate `numPubkeys` forward from the authoritative
+   *      `num_sends`.
    *   2. Derive `public_key` at index `numPubkeys` and
    *      `next_public_key` at index `numPubkeys + 1`.
-   *   3. Build the send message (UTF-8 hex address + recipient +
-   *      8-byte little-endian amount + timestamp) and hash it with
-   *      SHA-256.
-   *   4. Sign the digest with the Schnorr key at index `numPubkeys`
-   *      (deterministic nonce, matches Rust).
-   *   5. POST `/api/send`.
-   *   6. Increment `numPubkeys` locally so the next send uses the
-   *      next derivation index.
+   *   3. Build + SHA-256 the send message, Schnorr-sign at `numPubkeys`.
+   *   4. Admit the send job (`Idempotency-Key`).
+   *   5. Poll to `awaiting_signature`.
+   *   6. Build the commitment over `account_state_hash || output_coins_root`.
+   *   7. `POST /api/jobs/:id/commit`.
+   *   8. Poll to `completed`.
+   *   9. Advance `numPubkeys`.
+   *
+   * @param assetId optional 32-byte-hex multi-asset selector.
    */
-  async pay(recipient: string, amountSats: number): Promise<PayResult> {
-    // 1. Re-fetch authoritative state. The result isn't used directly
-    // here, but the call surfaces "balance too low" / "address unknown"
-    // / "API down" as a regular ApiError before we sign anything.
-    await this.client.balance(this.address);
+  async pay(recipient: string, amountSats: number, assetId?: string): Promise<PayResult> {
+    // 1. Re-fetch authoritative state (surfaces "balance too low" /
+    // "address unknown" / "API down" as a regular ApiError before we
+    // sign anything). The server's `num_sends` is the canonical send
+    // counter (thin-client invariant): hydrate our local derivation
+    // index forward from it so a wallet that lost local state — or sent
+    // from another device — derives at the correct next index instead
+    // of reusing index 0. Never regress below the local counter, which
+    // would risk reusing an in-flight derivation index.
+    const balance = await this.client.balance(this.address);
+    if (balance.num_sends > this.numPubkeys) {
+      this.numPubkeys = balance.num_sends;
+    }
 
     // 2. Derive the pubkey pair for this send.
     const { publicKey, nextPublicKey } = await derivePublicKeys(this.xpriv, this.numPubkeys);
 
-    // 3. Build + hash the message.
+    // 3. Build + hash + sign the send message.
     const timestamp = Math.floor(Date.now() / 1000);
     const messageBytes = buildSendMessage({
       accountAddress: this.address,
@@ -178,12 +256,9 @@ export class ZkCoinsAccount {
       timestamp,
     });
     const digestHex = bytesToHex(sha256(messageBytes));
-
-    // 4. Sign.
     const signingKey = await deriveSigningKey(this.xpriv, this.numPubkeys);
     const signature = await signSchnorr(signingKey, digestHex);
 
-    // 5. POST the signed request.
     const signed: SignedSendRequest = {
       account_address: this.address,
       recipient,
@@ -192,35 +267,164 @@ export class ZkCoinsAccount {
       next_public_key: nextPublicKey,
       signature,
       timestamp,
+      ...(assetId !== undefined ? { asset_id: assetId } : {}),
     };
-    const res: SendResponse = await this.client.send(signed);
 
-    // 6. Advance the index counter. Server may also persist this on
-    // its side, but the local counter is what drives the next derive.
+    // 4. Admit the send job.
+    const idempotencyKey = newIdempotencyKey();
+    const accepted = await this.client.sendJob(signed, idempotencyKey);
+    const jobId = accepted.job_id;
+
+    // 5. Poll to `awaiting_signature`. The node parks the job here with
+    // its send `proof_id` populated.
+    const awaiting = await this.waitForJob(
+      jobId,
+      new Set<StopStatus>(['awaiting_signature', ...TERMINAL_STATUSES]),
+    );
+    if (awaiting.status !== 'awaiting_signature') {
+      // A terminal status before awaiting_signature — waitForJob would
+      // have thrown on failed/cancelled, so this is the (unexpected)
+      // `completed`-without-commit case.
+      throw new JobFailedError(
+        jobId,
+        'failed',
+        `send job ended in ${awaiting.status} before commit`,
+      );
+    }
+    const proofId = awaiting.proof_id;
+    if (proofId === null || proofId === undefined) {
+      throw new JobFailedError(jobId, 'failed', 'awaiting_signature job did not carry a proof_id');
+    }
+
+    // 6. Build the commitment over account_state_hash || output_coins_root.
+    const { accountStateHash, outputCoinsRoot } = extractCommitInputs(awaiting, jobId);
+    const commitment = await createCommitment(
+      this.xpriv,
+      this.numPubkeys,
+      accountStateHash,
+      outputCoinsRoot,
+    );
+
+    // 7. Attach the signed commitment.
+    const commitReq: CommitRequest = {
+      proof_id: proofId,
+      public_key: commitment.publicKey,
+      signature: commitment.signature,
+      message: commitment.message,
+    };
+    await this.client.commitJob(jobId, commitReq);
+
+    // 8. Poll to `completed`.
+    await this.waitForJob(jobId, TERMINAL_STATUSES);
+
+    // 9. Advance the index counter.
     this.numPubkeys += 1;
 
-    return {
-      proofId: res.proof_id,
-      accountStateHash: res.account_state_hash,
-      outputCoinsRoot: res.output_coins_root,
-    };
+    return { jobId, proofId };
+  }
+
+  /** Per-address transaction history — `GET /api/history`. */
+  async getTransactions(opts: HistoryOpts = {}): Promise<HistoryResponse> {
+    return this.client.history(this.address, opts);
   }
 
   /**
-   * Per-address transaction history. **Throws `NotImplementedError`
-   * until zk-coins/node issue #153 ships.** The method signature is
-   * stable; only the underlying server endpoint is missing.
-   */
-  async getTransactions(_opts: HistoryOpts = {}): Promise<HistoryResponse> {
-    throw new NotImplementedError('ZkCoinsAccount.getTransactions', HISTORY_TRACKING_URL);
-  }
-
-  /**
-   * Claim `username` for this account.
+   * Receiving on zkCoins.
    *
-   * Mirrors the app's inline `signClaimRequest` flow: signs a fixed-
-   * prefix message with the identity key at index 0, then POSTs the
-   * signature + public_key + timestamp.
+   * There is **no client-initiated "receive" call** — and there should
+   * not be. A wallet receives by sharing its `address` (this account's
+   * `account.address`); the sender's `pay()` credits it server-side.
+   * The legacy `POST /api/receive` octet-stream route is internal
+   * plumbing, not a wallet method, and is deliberately *not* mirrored
+   * here (no fabricated endpoint).
+   *
+   * To observe an incoming credit, poll the authoritative balance /
+   * history (`getBalance()` / `getTransactions()`). `waitForIncoming`
+   * is an optional convenience over that polling loop: it reads the
+   * current balance, then polls until the balance rises above the
+   * baseline (or a caller-supplied `fromBalance`), and resolves with
+   * the updated `BalanceResponse`. It performs no signing and adds no
+   * trust assumption — it is purely `getBalance()` on a timer, so a
+   * consumer that prefers its own loop can ignore it entirely.
+   *
+   * @throws on timeout (a balance increase was not observed within
+   *   `timeoutMs`) or abort — never silently returns a stale balance.
+   */
+  async waitForIncoming(opts: WaitForIncomingOpts = {}): Promise<BalanceResponse> {
+    const pollInterval = opts.pollIntervalMs ?? DEFAULT_INCOMING_POLL_INTERVAL_MS;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_INCOMING_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+
+    // Baseline: the explicit target floor, or the balance at call time.
+    const baseline =
+      opts.fromBalance ?? (await this.client.balance(this.address, opts.signal)).balance;
+
+    for (;;) {
+      if (opts.signal?.aborted) {
+        throw new Error('waitForIncoming: aborted');
+      }
+      const current = await this.client.balance(this.address, opts.signal);
+      opts.onPoll?.(current);
+      if (current.balance > baseline) {
+        return current;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waitForIncoming: timed out after ${timeoutMs}ms; balance still ${current.balance} (baseline ${baseline})`,
+        );
+      }
+      await delay(pollInterval, opts.signal);
+    }
+  }
+
+  /**
+   * Poll a job until it reaches one of `stopAt` (always including the
+   * terminal set). Respects the node's `Retry-After` backoff; throws
+   * `JobFailedError` on `failed` / `cancelled` (no silent fallback).
+   */
+  async waitForJob(
+    jobId: string,
+    stopAt: ReadonlySet<StopStatus>,
+    opts: WaitForJobOpts = {},
+  ): Promise<JobStatus> {
+    const pollFloor = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    let lastPhase: string | undefined;
+
+    for (;;) {
+      if (opts.signal?.aborted) {
+        throw new Error(`waitForJob(${jobId}): aborted`);
+      }
+      const polled: JobStatusWithRetry = await this.client.getJobWithRetry(jobId, opts.signal);
+      const { status: job, retryAfterMs } = polled;
+
+      if (opts.onPhase && job.phase !== lastPhase) {
+        lastPhase = job.phase;
+        opts.onPhase(job);
+      }
+
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        throw new JobFailedError(jobId, job.status, job.error ?? undefined);
+      }
+      if (stopAt.has(job.status)) {
+        return job;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `waitForJob(${jobId}): timed out after ${timeoutMs}ms in status ${job.status}`,
+        );
+      }
+
+      const waitMs = Math.max(pollFloor, retryAfterMs ?? 0);
+      await delay(waitMs, opts.signal);
+    }
+  }
+
+  /**
+   * Claim `username` for this account. Signs a fixed-prefix message
+   * with the identity key at index 0, then POSTs the signature.
    */
   async claimUsername(username: string): Promise<UsernameResponse> {
     const timestamp = Math.floor(Date.now() / 1000);
@@ -231,7 +435,6 @@ export class ZkCoinsAccount {
     });
     const digestHex = bytesToHex(sha256(messageBytes));
 
-    // Identity key always at index 0 — matches the Rust contract.
     const { publicKey } = await derivePublicKeys(this.xpriv, 0);
     const signingKey = await deriveSigningKey(this.xpriv, 0);
     const signature = await signSchnorr(signingKey, digestHex);
@@ -253,8 +456,7 @@ export class ZkCoinsAccount {
 
   /**
    * Current local `numPubkeys` counter. Exposed for integrators that
-   * want to persist + restore wallet state across sessions; see the
-   * class doc-comment on the recovery semantics.
+   * want to persist + restore wallet state across sessions.
    */
   getNumPubkeys(): number {
     return this.numPubkeys;
@@ -262,10 +464,8 @@ export class ZkCoinsAccount {
 
   /**
    * Override the local `numPubkeys` counter — restore-from-storage
-   * path. The counter is monotonic by construction (it only ever
-   * increments on a successful send), so a future `setNumPubkeys` to
-   * a lower value would silently reuse a derivation index. This
-   * setter refuses to go backwards.
+   * path (e.g. seed `setNumPubkeys(balance.num_sends)`). The counter is
+   * monotonic by construction; this setter refuses to go backwards.
    */
   setNumPubkeys(value: number): void {
     if (!Number.isInteger(value) || value < this.numPubkeys) {
@@ -275,4 +475,51 @@ export class ZkCoinsAccount {
     }
     this.numPubkeys = value;
   }
+}
+
+/**
+ * Pull `account_state_hash` + `output_coins_root` out of an
+ * `awaiting_signature` job so the wallet can sign the commitment.
+ *
+ * The node surfaces these on the job's `result` object once it carries
+ * them. If they are absent the commit cannot be built, and we
+ * fail-hard (no fabricated commitment): the only correct recovery is
+ * the node populating them — see the type-level note below.
+ */
+function extractCommitInputs(
+  job: JobStatus,
+  jobId: string,
+): { accountStateHash: string; outputCoinsRoot: string } {
+  const ash = job.result?.account_state_hash;
+  const ocr = job.result?.output_coins_root;
+  if (typeof ash === 'string' && typeof ocr === 'string') {
+    return { accountStateHash: ash, outputCoinsRoot: ocr };
+  }
+  throw new JobFailedError(
+    jobId,
+    'failed',
+    'awaiting_signature job did not surface account_state_hash / output_coins_root as JSON; ' +
+      'the commit message cannot be built client-side from a pure-TS SDK (the node currently ' +
+      'exposes these only inside the binary CoinProof at GET /api/proof/:id). ' +
+      'Resolved once the node carries them on the awaiting_signature JobStatus.',
+  );
+}
+
+/** `setTimeout`-based delay that rejects if `signal` aborts mid-wait. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('waitForJob: aborted'));
+      return;
+    }
+    const handle = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(handle);
+      reject(new Error('waitForJob: aborted'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
