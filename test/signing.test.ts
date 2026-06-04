@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { schnorr } from '@noble/curves/secp256k1';
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { schnorr } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
 import { generateAccountKeysFromMnemonic, deriveSigningKey } from '../src/derivation.js';
 import { createCommitment, signSchnorr } from '../src/signing.js';
