@@ -2,6 +2,20 @@
 
 Thanks for the interest. The SDK is a small library with strict guarantees, so the contribution rules lean conservative.
 
+## Trust model — run your own node
+
+zkCoins follows the **Bitcoin full-node model: your wallet trusts _your_ node, exactly as a Bitcoin wallet trusts your own `bitcoind`.** "Trusted node" means _your_ node — never a third party. Running your own node is the trustless, private path, and it is the model the whole system is designed around. The node↔wallet split is packaging (a heavy validator process vs. a thin key-holder), not a trust boundary. The only line the node never crosses is the wallet's private key — that stays in the wallet.
+
+This is a hard project rule. It shapes every design and implementation decision:
+
+- **Self-hosting gives you trustlessness and privacy at once.** Your own node verifies your transactions and sees your plaintext — and _you_ are the operator, so nothing leaks. The wallet must always be able to switch to a different node by changing a single configuration value.
+- **Using someone else's node is a trade-off you choose, not a flaw.** A public operator can never steal, forge, or double-spend your coins — that is enforced cryptographically (recursive proofs + Bitcoin-anchored nullifiers). What a foreign operator can see is your privacy, and it can affect liveness — the same spectrum as using an Electrum/SPV server instead of your own Bitcoin node.
+- **The thin wallet and SDK are not a compromise.** No anti-node logic: no client-side proof verification, no scan loops, no view-key / spend-key splits, no consistency checks against a second node, no "node integrity" indicators in the UI. Trustlessness comes from running your own node, not from bolting verification onto a thin client. Anything that exists to reduce trust in the node belongs node-side — or the answer is self-hosting.
+- **The node is built so that self-hosting is easy.** Single container, documented configuration, deterministic state, no operator-specific dependencies.
+- **The SDK and wallet stay thin.** They expose seed + address + the small set of operations every familiar wallet SDK exposes. Integrators (Cake Wallet, LayerZ, BlueWallet, …) should be able to wire zkCoins up with the same effort as adding a second Bitcoin-family chain.
+
+When in doubt about whether a feature belongs in the wallet, SDK, or node: if it exists to reduce trust in the node, build it node-side, or document self-hosting as the answer. This rule is mirrored verbatim in [`zk-coins/node`](https://github.com/zk-coins/node/blob/develop/CONTRIBUTING.md), [`zk-coins/sdk`](https://github.com/zk-coins/sdk/blob/develop/CONTRIBUTING.md), [`zk-coins/app`](https://github.com/zk-coins/app/blob/develop/CONTRIBUTING.md), and [`zk-coins/docs`](https://github.com/zk-coins/docs/blob/develop/CONTRIBUTING.md).
+
 ## Scope
 
 `@zkcoins/sdk` is **pure TypeScript** — no WASM, no native modules, no environment-specific code paths. It must run identically in Node 22+, modern browsers, and React Native (Expo + bare workflow). Any change that breaks this is rejected on principle, even if it would simplify the SDK internally.
@@ -69,6 +83,34 @@ Longer body explaining WHY, not WHAT — the diff already shows what.
 ```
 
 Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `ci`, `build`, `perf`.
+
+## Releasing
+
+Releases are gated by `npm version` plus the auto-release-pr workflow. The version field in `package.json` is the single source of truth — `src/version.ts` is regenerated from it by `scripts/sync-version.cjs` (wired in as the `version` lifecycle hook in `package.json#scripts`). Hand-editing the version field anywhere is unnecessary and surfaced loudly by `test/version.test.ts` if attempted.
+
+End-to-end flow for a release:
+
+```bash
+# On develop, with all feature work merged and committed.
+npm version patch   # or minor / major
+# ↑ This bumps package.json, runs sync-version.cjs (which updates
+#   src/version.ts and stages it), creates a single "v0.1.2" commit
+#   with both files, and creates a local tag v0.1.2.
+
+git push origin develop
+# ↑ Pushes the bump commit. The auto-release-pr workflow opens
+#   (or updates) "Release: develop -> main" with the bump diff
+#   included. Review and merge as a maintainer.
+
+git push origin v0.1.2
+# ↑ Pushes the tag. publish.yaml triggers, runs the full
+#   pre-publish gate again, and `npm publish --provenance` ships
+#   @zkcoins/sdk@0.1.2 to npm with OIDC provenance attestation.
+```
+
+The tag push is the "send it" step — gated by the maintainer's explicit action after the release PR has merged to `main`. Never push the tag before the merge: publish would ship from a develop-only commit before the main branch has caught up.
+
+If the auto-release-pr workflow fails or you need to amend mid-release: don't force-push the tag (npm publish would reject the same version anyway). Bump again (`npm version patch` produces v0.1.3) and start over — versions are cheap, history is forever.
 
 ## Issues
 

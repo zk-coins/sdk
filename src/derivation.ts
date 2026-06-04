@@ -34,10 +34,10 @@ import {
   mnemonicToSeedSync,
   validateMnemonic as scureValidateMnemonic,
 } from '@scure/bip39';
-import { wordlist } from '@scure/bip39/wordlists/english';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 import { HDKey } from '@scure/bip32';
-import { sha256 } from '@noble/hashes/sha256';
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
 /** Account material returned by `generateAccountKeys` and friends. */
 export interface AccountKeys {
