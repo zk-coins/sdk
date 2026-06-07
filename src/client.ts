@@ -57,10 +57,12 @@ import {
   ReadyResponseSchema,
   ResolveUsernameResponseSchema,
   RootResponseSchema,
+  TxDetailSchema,
   type AddressesResponse,
   type BalanceResponse,
   type ClaimUsernameResponse,
   type HistoryResponse,
+  type TxDetail,
   type InfoResponse,
   type InscriptionSummary,
   type JobAccepted,
@@ -280,6 +282,19 @@ export class ZkCoinsClient {
       HistoryResponseSchema,
       opts.signal ? { signal: opts.signal } : {},
     );
+  }
+
+  /**
+   * Full detail for one transaction — `GET /api/history/{id}` →
+   * {@link TxDetail}. `id` is a `TxItem.id` from a {@link history} page;
+   * `address` scopes the lookup to the account the caller already knows
+   * (a wrong-address or internal row 404s — surfaced as `ApiError`).
+   * Malformed input (bad address hex, non-positive id) is a node-side
+   * 422, mirroring the list endpoint's validation contract.
+   */
+  async getTransaction(id: number, address: string, signal?: AbortSignal): Promise<TxDetail> {
+    const url = `/api/history/${encodeURIComponent(String(id))}?address=${encodeURIComponent(address)}`;
+    return this.request(url, TxDetailSchema, signal ? { signal } : {});
   }
 
   /**

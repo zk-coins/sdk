@@ -57,6 +57,7 @@ export type {
   InfoResponse,
   TxItem,
   HistoryResponse,
+  TxDetail,
   JobStatusValue,
   JobKind,
   JobAccepted,
