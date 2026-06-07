@@ -33,6 +33,7 @@ export {
   InfoResponseSchema,
   TxItemSchema,
   HistoryResponseSchema,
+  TxDetailSchema,
   JobStatusValueSchema,
   JobKindSchema,
   JobAcceptedSchema,
