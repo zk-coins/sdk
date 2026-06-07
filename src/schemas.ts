@@ -188,6 +188,37 @@ export const HistoryResponseSchema = z.object({
 });
 export type HistoryResponse = z.infer<typeof HistoryResponseSchema>;
 
+/**
+ * `GET /api/history/{id}` — `router::TxDetail`. The full per-transaction
+ * detail: every `TxItem` core field plus the decoded account-state
+ * snapshot of the mutation, the verifier circuit digest, and the
+ * on-chain commit output value. `extend`s {@link TxItemSchema} so the
+ * shared core can never drift from the list shape.
+ *
+ * Detail-only fields, mirroring the node serde:
+ *  - `address` — the queried address, echoed lower-case hex (no `0x`).
+ *  - `balance_after` — usable balance (settled + queued) after the tx.
+ *  - `balance_before` — usable balance before; `null` on the first row.
+ *  - `num_sends_after` — the account's own-send counter after the tx
+ *    (the wallet's authoritative BIP-32 child index).
+ *  - `commitment_public_key` — 33-byte compressed secp256k1 pubkey
+ *    (hex); `null` before the account has ever sent.
+ *  - `circuit_digest` — the node's verifier circuit identity (hex);
+ *    `null` only pre-first-proof.
+ *  - `commit_output_value` — sats in the commit inscription output when
+ *    a publisher inscription exists; `null` otherwise.
+ */
+export const TxDetailSchema = TxItemSchema.extend({
+  address: z.string(),
+  balance_after: z.number(),
+  balance_before: z.number().nullable(),
+  num_sends_after: z.number(),
+  commitment_public_key: z.string().nullable(),
+  circuit_digest: z.string().nullable(),
+  commit_output_value: z.number().nullable(),
+});
+export type TxDetail = z.infer<typeof TxDetailSchema>;
+
 // ---------------------------------------------------------------------------
 // Jobs API (`/api/jobs/*`)
 // ---------------------------------------------------------------------------

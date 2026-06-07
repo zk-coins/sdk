@@ -19,6 +19,7 @@ import {
   ReadyResponseSchema,
   ResolveUsernameResponseSchema,
   RootResponseSchema,
+  TxDetailSchema,
   TxItemSchema,
   UsernameResponseSchema,
 } from '../src/schemas.js';
@@ -257,6 +258,70 @@ describe('TxItemSchema + HistoryResponseSchema', () => {
     });
     expect(r.items).toHaveLength(1);
     expect(r.total).toBe(1);
+  });
+});
+
+describe('TxDetailSchema', () => {
+  const fullMint = {
+    id: 119,
+    address: 'f1'.repeat(32),
+    txid: null,
+    timestamp: 1780823652,
+    direction: 'mint',
+    amount: 10000,
+    counterparty: null,
+    status: 'pending',
+    block_height: null,
+    memo: null,
+    balance_after: 10000,
+    balance_before: null,
+    num_sends_after: 0,
+    commitment_public_key: null,
+    circuit_digest: 'e05c08f4',
+    commit_output_value: null,
+  };
+
+  it('parses a from-genesis mint detail (all detail-only nullables null)', () => {
+    const r = TxDetailSchema.parse(fullMint);
+    expect(r.id).toBe(119);
+    expect(r.address).toBe('f1'.repeat(32));
+    expect(r.balance_after).toBe(10000);
+    expect(r.balance_before).toBeNull();
+    expect(r.num_sends_after).toBe(0);
+    expect(r.commitment_public_key).toBeNull();
+    expect(r.circuit_digest).toBe('e05c08f4');
+    expect(r.commit_output_value).toBeNull();
+  });
+
+  it('parses a confirmed send detail with every detail field populated', () => {
+    const r = TxDetailSchema.parse({
+      ...fullMint,
+      direction: 'send',
+      status: 'confirmed',
+      txid: 'ab'.repeat(32),
+      block_height: 900001,
+      amount: 6000,
+      balance_after: 4000,
+      balance_before: 10000,
+      num_sends_after: 1,
+      commitment_public_key: '02'.padEnd(66, 'a'),
+      commit_output_value: 546,
+    });
+    expect(r.direction).toBe('send');
+    expect(r.balance_before).toBe(10000);
+    expect(r.num_sends_after).toBe(1);
+    expect(r.commit_output_value).toBe(546);
+    expect(r.commitment_public_key).toHaveLength(66);
+  });
+
+  it('keeps the TxItem core contract (rejects a missing core field)', () => {
+    const { id: _omit, ...withoutId } = fullMint;
+    expect(() => TxDetailSchema.parse(withoutId)).toThrow();
+  });
+
+  it('rejects a missing detail-only field (the node emits all of them)', () => {
+    const { balance_after: _omit, ...withoutBalanceAfter } = fullMint;
+    expect(() => TxDetailSchema.parse(withoutBalanceAfter)).toThrow();
   });
 });
 

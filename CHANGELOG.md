@@ -4,6 +4,24 @@ All notable changes to `@zkcoins/sdk` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0]
+
+### Added
+
+- **`ZkCoinsClient.getTransaction(id, address)`** — `GET
+/api/history/{id}` → `TxDetail`. The full per-transaction detail
+  behind the wallet's transaction-detail page: every `TxItem` core field
+  plus the decoded account-state snapshot of the mutation
+  (`balance_after` / `balance_before` / `num_sends_after` /
+  `commitment_public_key`), the verifier `circuit_digest`, and the
+  on-chain `commit_output_value`. Scoped by `address` (a wrong-address or
+  internal row 404s as `ApiError`).
+- **`TxDetailSchema` / `TxDetail`** — the wire schema, `extend`ing
+  `TxItemSchema` so the shared list/detail core cannot drift. Mirrors the
+  node's `router::TxDetail` serde.
+
+Purely additive — no breaking changes to the 0.3.x surface.
+
 ## [0.3.1]
 
 ### Fixed

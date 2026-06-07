@@ -218,6 +218,80 @@ describe('ZkCoinsClient.history', () => {
   });
 });
 
+describe('ZkCoinsClient.getTransaction', () => {
+  it('hits /api/history/{id} with the id in the path and address in the query', async () => {
+    let path: string | null = null;
+    let address: string | null = null;
+    server.use(
+      http.get(`${BASE}/api/history/:id`, ({ request, params }) => {
+        path = String(params.id);
+        address = new URL(request.url).searchParams.get('address');
+        return HttpResponse.json({
+          id: 119,
+          address: 'ab',
+          txid: null,
+          timestamp: 0,
+          direction: 'mint',
+          amount: 1000,
+          counterparty: null,
+          status: 'pending',
+          block_height: null,
+          memo: null,
+          balance_after: 1000,
+          balance_before: null,
+          num_sends_after: 0,
+          commitment_public_key: null,
+          circuit_digest: 'cd',
+          commit_output_value: null,
+        });
+      }),
+    );
+    await newClient().getTransaction(119, 'abcd');
+    expect(path).toBe('119');
+    expect(address).toBe('abcd');
+  });
+
+  it('parses the full TxDetail (decoded snapshot + proof fields)', async () => {
+    server.use(
+      http.get(`${BASE}/api/history/:id`, () =>
+        HttpResponse.json({
+          id: 7,
+          address: 'ee',
+          txid: 'abc',
+          timestamp: 100,
+          direction: 'send',
+          amount: 6000,
+          counterparty: null,
+          status: 'confirmed',
+          block_height: 900001,
+          memo: null,
+          balance_after: 4000,
+          balance_before: 10000,
+          num_sends_after: 1,
+          commitment_public_key: '02aa',
+          circuit_digest: 'cd',
+          commit_output_value: 546,
+        }),
+      ),
+    );
+    const d = await newClient().getTransaction(7, 'eeee');
+    expect(d.direction).toBe('send');
+    expect(d.balance_before).toBe(10000);
+    expect(d.num_sends_after).toBe(1);
+    expect(d.circuit_digest).toBe('cd');
+    expect(d.commit_output_value).toBe(546);
+  });
+
+  it('throws ApiError on a 404 (unknown / wrong-address row)', async () => {
+    server.use(
+      http.get(`${BASE}/api/history/:id`, () =>
+        HttpResponse.json({ error: 'Transaction not found' }, { status: 404 }),
+      ),
+    );
+    await expect(newClient().getTransaction(999, 'abcd')).rejects.toThrow(ApiError);
+  });
+});
+
 describe('ZkCoinsClient.mintJob', () => {
   it('admits a mint job with the Idempotency-Key header and no asset_id', async () => {
     let body: Record<string, unknown> = {};
