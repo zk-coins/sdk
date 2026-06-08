@@ -53,6 +53,7 @@ import {
   InscriptionSummarySchema,
   JobAcceptedSchema,
   JobStatusSchema,
+  OwnerBalanceResponseSchema,
   PublisherHealthResponseSchema,
   ReadyResponseSchema,
   ResolveUsernameResponseSchema,
@@ -62,6 +63,7 @@ import {
   type BalanceResponse,
   type ClaimUsernameResponse,
   type HistoryResponse,
+  type OwnerBalanceResponse,
   type TxDetail,
   type InfoResponse,
   type InscriptionSummary,
@@ -73,16 +75,41 @@ import {
   type RootResponse,
 } from './schemas.js';
 
-/** Inputs to a mint job (`POST /api/jobs/mint`). */
+/**
+ * Inputs to a creator-signed mint job (`POST /api/jobs/mint`).
+ *
+ * Neutral, permissionless model (Model B): anyone creates their own
+ * asset and mints their own supply; nobody can mint a foreign asset.
+ * The owner (`H(creator_pubkey)`) and `asset_id`
+ * (`calculate_asset_id(creator_pubkey, H(name), decimals)`) are DERIVED
+ * server-side — they are never accepted from the wire. The request is
+ * authenticated by a BIP-340 Schnorr signature over the mint fields
+ * (see {@link buildMintMessage}); the mint is two-phase like a send
+ * (admit → `awaiting_signature` → `POST /api/jobs/:id/commit`).
+ */
 export interface MintRequest {
-  account_address: string;
+  /** Compressed secp256k1 creator pubkey, 33-byte hex (66 chars). */
+  creator_pubkey: string;
+  /** Human-facing asset name; folded into the asset_id by the node. */
+  name: string;
+  /** Asset decimals (`u8`); part of the asset_id derivation. */
+  decimals: number;
+  /** Amount to mint into the creator's own balance, atomic units. */
   amount: number;
   /**
-   * Multi-asset selector. Omit for the native asset; a present value
-   * MUST be valid 32-byte hex (the node 422s a malformed one — no
-   * silent fallback to native).
+   * The wallet's NEXT rotation key; the mint commitment is signed by
+   * `creator_pubkey` but the proof rotates to this fresh key like a send.
+   * Compressed secp256k1 pubkey, 33-byte hex (66 chars).
    */
-  asset_id?: string;
+  next_public_key: string;
+  /**
+   * Hex BIP-340 Schnorr signature (64 bytes) over
+   * `SHA256(creator_pubkey ‖ name ‖ [decimals] ‖ amount_le ‖ timestamp_le)`,
+   * verifiable against `creator_pubkey`.
+   */
+  signature: string;
+  /** Unix epoch seconds the signature was produced at (freshness-gated). */
+  timestamp: number;
 }
 
 /** Inputs to `POST /api/jobs/send` *before* signing. */
@@ -93,8 +120,16 @@ export interface SendRequest {
   public_key: string;
   next_public_key: string;
   prev_commitment_pubkey?: string;
-  /** Multi-asset selector — see `MintRequest.asset_id`. */
-  asset_id?: string;
+  /**
+   * The asset to move — 32-byte hex, REQUIRED. There is no native /
+   * default asset under the neutral multi-asset model: the node 422s a
+   * missing or malformed value (no silent fallback, which would move
+   * the wrong asset under a `200`). Discover held assets + their ids
+   * via {@link ZkCoinsClient.ownerBalances}. The send *signature* does
+   * not cover this field — the asset is bound in-circuit through the
+   * `account_state_hash` the wallet signs at commit time.
+   */
+  asset_id: string;
 }
 
 /** Inputs to `POST /api/jobs/send` with signature + timestamp attached. */
@@ -259,9 +294,32 @@ export class ZkCoinsClient {
 
   // ---- Read endpoints ----------------------------------------------------
 
-  async balance(address: string, signal?: AbortSignal): Promise<BalanceResponse> {
-    const url = `/api/balance?address=${encodeURIComponent(address)}`;
+  /**
+   * Per-`(owner, asset)` balance — `GET /api/balance?address=&asset_id=`.
+   *
+   * Both params are REQUIRED under the neutral multi-asset model (there
+   * is no native/default asset): a malformed or missing `asset_id` is a
+   * node-side 422 (surfaced as `ApiError`), never a silent fallback. To
+   * list every asset an owner holds in one call, use
+   * {@link ownerBalances}.
+   */
+  async balance(address: string, assetId: string, signal?: AbortSignal): Promise<BalanceResponse> {
+    const url = `/api/balance?address=${encodeURIComponent(address)}&asset_id=${encodeURIComponent(assetId)}`;
     return this.request(url, BalanceResponseSchema, signal ? { signal } : {});
+  }
+
+  /**
+   * Cross-asset balance list — `GET /api/balance/:address` →
+   * {@link OwnerBalanceResponse}. One entry per asset the owner holds,
+   * each with its own balance / num_sends / display metadata. An
+   * unobserved address returns `assets: []` (canonical, not a 404). This
+   * is the multi-asset replacement for a single-balance read: the wallet
+   * fetches it once to discover which assets it holds, then drives
+   * per-asset sends with the returned `asset_id`s.
+   */
+  async ownerBalances(address: string, signal?: AbortSignal): Promise<OwnerBalanceResponse> {
+    const url = `/api/balance/${encodeURIComponent(address)}`;
+    return this.request(url, OwnerBalanceResponseSchema, signal ? { signal } : {});
   }
 
   async info(signal?: AbortSignal): Promise<InfoResponse> {

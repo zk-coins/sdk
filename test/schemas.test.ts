@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AddressesResponseSchema,
+  AssetBalanceSchema,
   BalanceResponseSchema,
   BitcoinNetworkSchema,
   CapabilitiesSchema,
@@ -17,6 +18,7 @@ import {
   JobStatusValueSchema,
   PublisherHealthResponseSchema,
   ReadyResponseSchema,
+  OwnerBalanceResponseSchema,
   ResolveUsernameResponseSchema,
   RootResponseSchema,
   TxDetailSchema,
@@ -47,6 +49,78 @@ describe('BalanceResponseSchema', () => {
 
   it('rejects wrong-type balance', () => {
     expect(() => BalanceResponseSchema.parse({ balance: '5', num_sends: 0 })).toThrow();
+  });
+});
+
+describe('AssetBalanceSchema', () => {
+  it('requires asset_id + balance + num_sends, allows name/decimals', () => {
+    expect(
+      AssetBalanceSchema.parse({
+        asset_id: 'aa',
+        name: 'Gold',
+        decimals: 8,
+        balance: 100,
+        num_sends: 2,
+      }),
+    ).toEqual({ asset_id: 'aa', name: 'Gold', decimals: 8, balance: 100, num_sends: 2 });
+  });
+
+  it('parses with name + decimals elided (received-only asset)', () => {
+    expect(AssetBalanceSchema.parse({ asset_id: 'bb', balance: 0, num_sends: 0 })).toEqual({
+      asset_id: 'bb',
+      balance: 0,
+      num_sends: 0,
+    });
+  });
+
+  it('rejects a missing asset_id (the trust anchor must be present)', () => {
+    expect(() => AssetBalanceSchema.parse({ balance: 0, num_sends: 0 })).toThrow();
+  });
+
+  it('rejects a missing num_sends', () => {
+    expect(() => AssetBalanceSchema.parse({ asset_id: 'cc', balance: 0 })).toThrow();
+  });
+
+  it('rejects a wrong-type decimals', () => {
+    expect(() =>
+      AssetBalanceSchema.parse({ asset_id: 'dd', decimals: '8', balance: 0, num_sends: 0 }),
+    ).toThrow();
+  });
+});
+
+describe('OwnerBalanceResponseSchema', () => {
+  it('parses an owner with multiple asset entries', () => {
+    const parsed = OwnerBalanceResponseSchema.parse({
+      address: 'abcd',
+      username: 'alice',
+      assets: [
+        { asset_id: 'aa', name: 'Gold', decimals: 8, balance: 100, num_sends: 1 },
+        { asset_id: 'bb', balance: 5, num_sends: 0 },
+      ],
+    });
+    expect(parsed.assets).toHaveLength(2);
+    expect(parsed.username).toBe('alice');
+  });
+
+  it('parses an unobserved address as an empty asset list, username elided', () => {
+    expect(OwnerBalanceResponseSchema.parse({ address: 'ef', assets: [] })).toEqual({
+      address: 'ef',
+      assets: [],
+    });
+  });
+
+  it('rejects a missing address', () => {
+    expect(() => OwnerBalanceResponseSchema.parse({ assets: [] })).toThrow();
+  });
+
+  it('rejects a missing assets array', () => {
+    expect(() => OwnerBalanceResponseSchema.parse({ address: 'ab' })).toThrow();
+  });
+
+  it('rejects an asset entry that violates AssetBalanceSchema', () => {
+    expect(() =>
+      OwnerBalanceResponseSchema.parse({ address: 'ab', assets: [{ balance: 0, num_sends: 0 }] }),
+    ).toThrow();
   });
 });
 

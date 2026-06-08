@@ -76,14 +76,18 @@ async function main(): Promise<void> {
     }
   }
 
-  // 3. Read the node's view of this address.
-  const initial = await account.getBalance();
-  console.warn('initial balance:', initial.balance, 'sats; num_sends:', initial.num_sends);
+  // 3. Read the node's view of this address. Under the neutral
+  //    multi-asset model there is no native/default asset, so the wallet
+  //    lists every asset it holds via `getAssets()`.
+  const initialAssets = await account.getAssets();
+  console.warn('initial assets held:', initialAssets.assets.length);
 
-  // 4. Run a mint job to completion. The SDK polls the job for you and
-  //    throws JobFailedError if the prove/broadcast leg fails.
+  // 4. Create + mint a named asset to completion. The asset_id is derived
+  //    node-side from `(creator_pubkey, H(name), decimals)`; the SDK
+  //    drives the two-phase (admit → commit) job and throws
+  //    JobFailedError if the prove/broadcast leg fails.
   try {
-    const mint = await account.mint(/* amountSats */ 10_000);
+    const mint = await account.mint({ name: 'DemoCoin', decimals: 8, amount: 10_000 });
     console.warn('mint completed — proof_id:', mint.proofId);
   } catch (err) {
     if (err instanceof JobFailedError) {
@@ -95,9 +99,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // 5. Re-read balance — the thin-client invariant in action.
-  const post = await account.getBalance();
-  console.warn('post-mint balance:', post.balance, 'sats');
+  // 5. Re-read balances — the thin-client invariant in action. The first
+  //    asset's id can then drive `getBalance(assetId)` / `pay(...)`.
+  const post = await account.getAssets();
+  for (const a of post.assets) {
+    console.warn('asset', a.asset_id, '→', a.balance, '(num_sends:', a.num_sends, ')');
+  }
 
   // 6. List recent history. Each mint/send/receive shows up as a row;
   //    a row with a `txid` can be looked up via
