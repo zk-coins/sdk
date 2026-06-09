@@ -32,6 +32,7 @@ const newAccount = () =>
   });
 
 const RECIPIENT = 'cdef'.padEnd(64, '0');
+const ASSET_ID = 'aa'.repeat(32);
 
 describe('ZkCoinsAccount.fromMnemonic', () => {
   it('produces a 32-byte hex address', async () => {
@@ -74,13 +75,21 @@ describe('ZkCoinsAccount.fromMnemonic', () => {
 });
 
 describe('ZkCoinsAccount.getBalance', () => {
-  it('forwards to the underlying client (incl. num_sends)', async () => {
+  it('forwards address + asset_id to the per-asset balance endpoint', async () => {
+    let address = '';
+    let assetId = '';
     server.use(
-      http.get(`${BASE}/api/balance`, () =>
-        HttpResponse.json({ balance: 12345, username: 'satoshi', num_sends: 2 }),
-      ),
+      http.get(`${BASE}/api/balance`, ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        address = params.get('address') ?? '';
+        assetId = params.get('asset_id') ?? '';
+        return HttpResponse.json({ balance: 12345, username: 'satoshi', num_sends: 2 });
+      }),
     );
-    const r = await (await newAccount()).getBalance();
+    const account = await newAccount();
+    const r = await account.getBalance(ASSET_ID);
+    expect(address).toBe(account.address);
+    expect(assetId).toBe(ASSET_ID);
     expect(r.balance).toBe(12345);
     expect(r.num_sends).toBe(2);
   });
@@ -91,29 +100,82 @@ describe('ZkCoinsAccount.getBalance', () => {
         HttpResponse.json({ error: 'address not found' }, { status: 404 }),
       ),
     );
-    await expect((await newAccount()).getBalance()).rejects.toThrow(/address not found/);
+    await expect((await newAccount()).getBalance(ASSET_ID)).rejects.toThrow(/address not found/);
   });
 });
 
-describe('ZkCoinsAccount.mint', () => {
-  it('admits a mint job and polls to completed', async () => {
-    let mintBody: Record<string, unknown> = {};
-    let polls = 0;
+describe('ZkCoinsAccount.getAssets', () => {
+  it('lists every asset the account holds via /api/balance/:address', async () => {
+    let observed = '';
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, ({ params }) => {
+        observed = params.address as string;
+        return HttpResponse.json({
+          address: 'abcd',
+          assets: [
+            { asset_id: ASSET_ID, name: 'Gold', decimals: 8, balance: 100, num_sends: 1 },
+            { asset_id: 'bb'.repeat(32), balance: 5, num_sends: 0 },
+          ],
+        });
+      }),
+    );
+    const account = await newAccount();
+    const r = await account.getAssets();
+    expect(observed).toBe(account.address);
+    expect(r.assets).toHaveLength(2);
+    expect(r.assets[0]?.asset_id).toBe(ASSET_ID);
+  });
+
+  it('forwards a caller-supplied abort signal', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ address: 'ab', assets: [] });
+      }),
+    );
+    const account = await newAccount();
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(account.getAssets(ctrl.signal)).rejects.toThrow();
+  });
+});
+
+describe('ZkCoinsAccount.mint (two-phase creator-signed lifecycle)', () => {
+  // Drive a mint job through queued → awaiting_signature (carrying
+  // proof_id + ash/ocr) → broadcasting → completed, exercising the
+  // creator-signed admit body and the index-0 commitment build.
+  const installMintLifecycle = (opts: {
+    jobId: string;
+  }): { mintBody: Record<string, unknown>; commits: unknown[] } => {
+    const captured = { mintBody: {} as Record<string, unknown>, commits: [] as unknown[] };
+    let phase: 'await' | 'committed' = 'await';
     server.use(
       http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
-        mintBody = (await request.json()) as typeof mintBody;
-        return HttpResponse.json({ job_id: 'mint-1', status: 'queued' }, { status: 202 });
+        captured.mintBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ job_id: opts.jobId, status: 'queued' }, { status: 202 });
       }),
-      http.get(`${BASE}/api/jobs/mint-1`, () => {
-        polls += 1;
-        if (polls < 2) {
+      http.post(`${BASE}/api/jobs/${opts.jobId}/commit`, async ({ request }) => {
+        captured.commits.push(await request.json());
+        phase = 'committed';
+        return HttpResponse.json({ status: 'broadcasting' });
+      }),
+      http.get(`${BASE}/api/jobs/${opts.jobId}`, () => {
+        if (phase === 'await') {
           return HttpResponse.json(
-            { job_id: 'mint-1', kind: 'mint', status: 'proving', phase: 'proving', progress: 50 },
+            {
+              job_id: opts.jobId,
+              kind: 'mint',
+              status: 'awaiting_signature',
+              phase: 'awaiting_signature',
+              progress: 60,
+              proof_id: 7,
+              result: { success: true, account_state_hash: ASH, output_coins_root: OCR },
+            },
             { headers: { 'Retry-After': '0' } },
           );
         }
         return HttpResponse.json({
-          job_id: 'mint-1',
+          job_id: opts.jobId,
           kind: 'mint',
           status: 'completed',
           phase: 'completed',
@@ -122,37 +184,66 @@ describe('ZkCoinsAccount.mint', () => {
         });
       }),
     );
+    return captured;
+  };
+
+  it('admits a creator-signed mint, commits at index 0, and completes', async () => {
+    const captured = installMintLifecycle({ jobId: 'mint-1' });
     const account = await newAccount();
-    const r = await account.mint(10_000);
-    expect(mintBody).toEqual({ account_address: account.address, amount: 10_000 });
-    expect(mintBody).not.toHaveProperty('asset_id');
+    const r = await account.mint({ name: 'Gold', decimals: 8, amount: 10_000 });
+
     expect(r.jobId).toBe('mint-1');
     expect(r.proofId).toBe(7);
+
+    // The admit body is the creator-signed mint request shape (no asset_id).
+    const body = captured.mintBody;
+    expect(body).not.toHaveProperty('asset_id');
+    expect(body.name).toBe('Gold');
+    expect(body.decimals).toBe(8);
+    expect(body.amount).toBe(10_000);
+    expect(typeof body.creator_pubkey).toBe('string');
+    expect(typeof body.next_public_key).toBe('string');
+    expect(typeof body.signature).toBe('string');
+    expect(typeof body.timestamp).toBe('number');
+
+    // creator_pubkey is the wallet's index-0 key; next_public_key is index 1.
+    const { generateAccountKeysFromMnemonic, derivePublicKeys } =
+      await import('../src/derivation.js');
+    const { xpriv } = await generateAccountKeysFromMnemonic(TEST_MNEMONIC, '');
+    const idx0 = await derivePublicKeys(xpriv, 0);
+    expect(body.creator_pubkey).toBe(idx0.publicKey);
+    expect(body.next_public_key).toBe(idx0.nextPublicKey);
+
+    // The mint signature verifies under the creator pubkey over the mint message.
+    const { buildMintMessage } = await import('../src/messages.js');
+    const mintMsg = buildMintMessage({
+      creatorPubkey: body.creator_pubkey as string,
+      name: body.name as string,
+      decimals: body.decimals as number,
+      amount: body.amount as number,
+      timestamp: body.timestamp as number,
+    });
+    const mintDigest = sha256(mintMsg);
+    const mintXOnly = hexToBytes(body.creator_pubkey as string).slice(1);
+    expect(schnorr.verify(hexToBytes(body.signature as string), mintDigest, mintXOnly)).toBe(true);
+
+    // The commitment is signed with the SAME creator key (index 0) over ash||ocr.
+    expect(captured.commits).toHaveLength(1);
+    const commit = captured.commits[0] as {
+      proof_id: number;
+      public_key: string;
+      signature: string;
+      message: string;
+    };
+    expect(commit.proof_id).toBe(7);
+    expect(commit.public_key).toBe(idx0.publicKey);
+    expect(commit.message).toBe(ASH + OCR);
+    const commitDigest = sha256(hexToBytes(commit.message));
+    const commitXOnly = hexToBytes(commit.public_key).slice(1);
+    expect(schnorr.verify(hexToBytes(commit.signature), commitDigest, commitXOnly)).toBe(true);
   });
 
-  it('passes asset_id through on a multi-asset mint', async () => {
-    let mintBody: Record<string, unknown> = {};
-    server.use(
-      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
-        mintBody = (await request.json()) as typeof mintBody;
-        return HttpResponse.json({ job_id: 'mint-2', status: 'queued' }, { status: 202 });
-      }),
-      http.get(`${BASE}/api/jobs/mint-2`, () =>
-        HttpResponse.json({
-          job_id: 'mint-2',
-          kind: 'mint',
-          status: 'completed',
-          phase: 'completed',
-          progress: 100,
-          result: { success: true, proof_id: 1 },
-        }),
-      ),
-    );
-    await (await newAccount()).mint(5, 'ff'.repeat(32));
-    expect(mintBody.asset_id).toBe('ff'.repeat(32));
-  });
-
-  it('throws JobFailedError when the mint job fails', async () => {
+  it('throws JobFailedError when the mint job fails before awaiting_signature', async () => {
     server.use(
       http.post(`${BASE}/api/jobs/mint`, () =>
         HttpResponse.json({ job_id: 'mint-3', status: 'queued' }, { status: 202 }),
@@ -168,7 +259,67 @@ describe('ZkCoinsAccount.mint', () => {
         }),
       ),
     );
-    await expect((await newAccount()).mint(10_000)).rejects.toThrow(/mint rejected on mainnet/);
+    await expect(
+      (await newAccount()).mint({ name: 'Gold', decimals: 8, amount: 10_000 }),
+    ).rejects.toThrow(/mint rejected on mainnet/);
+  });
+
+  it('throws if the mint job completes before reaching awaiting_signature', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/mint`, () =>
+        HttpResponse.json({ job_id: 'mint-skip', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/mint-skip`, () =>
+        HttpResponse.json({
+          job_id: 'mint-skip',
+          kind: 'mint',
+          status: 'completed',
+          phase: 'completed',
+          result: { success: true, proof_id: 1 },
+        }),
+      ),
+    );
+    await expect(
+      (await newAccount()).mint({ name: 'Gold', decimals: 8, amount: 5 }),
+    ).rejects.toThrow(/before commit/);
+  });
+
+  it('fails hard when the awaiting_signature mint omits proof_id', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/mint`, () =>
+        HttpResponse.json({ job_id: 'mint-nopid', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/mint-nopid`, () =>
+        HttpResponse.json(
+          {
+            status: 'awaiting_signature',
+            phase: 'awaiting_signature',
+            result: { account_state_hash: ASH, output_coins_root: OCR },
+          },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    await expect(
+      (await newAccount()).mint({ name: 'Gold', decimals: 8, amount: 5 }),
+    ).rejects.toThrow(/proof_id/);
+  });
+
+  it('fails hard when the awaiting_signature mint omits ash/ocr (no fabricated commit)', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/mint`, () =>
+        HttpResponse.json({ job_id: 'mint-noash', status: 'queued' }, { status: 202 }),
+      ),
+      http.get(`${BASE}/api/jobs/mint-noash`, () =>
+        HttpResponse.json(
+          { status: 'awaiting_signature', phase: 'awaiting_signature', proof_id: 9 },
+          { headers: { 'Retry-After': '0' } },
+        ),
+      ),
+    );
+    await expect(
+      (await newAccount()).mint({ name: 'Gold', decimals: 8, amount: 5 }),
+    ).rejects.toThrow(/account_state_hash/);
   });
 });
 
@@ -176,14 +327,27 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
   // Drive a job through queued → proving → awaiting_signature (with
   // proof_id + ash/ocr on the result) → broadcasting → completed,
   // exercising the wallet's commit-message build + numPubkeys advance.
-  const installSendLifecycle = (opts: { jobId: string }): { commits: unknown[] } => {
-    const captured = { commits: [] as unknown[] };
+  // `pay` now reads the cross-asset balance (GET /api/balance/:address)
+  // for both the funds check (per-asset balance) and the global signing
+  // index (sum of every asset's num_sends).
+  const installSendLifecycle = (opts: {
+    jobId: string;
+    balance?: number;
+    assets?: { asset_id: string; balance: number; num_sends: number }[];
+  }): { commits: unknown[]; sendBody: Record<string, unknown> | null } => {
+    const captured = { commits: [] as unknown[], sendBody: null as Record<string, unknown> | null };
     let phase: 'await' | 'committed' = 'await';
+    const assets = opts.assets ?? [
+      { asset_id: ASSET_ID, balance: opts.balance ?? 10_000, num_sends: 0 },
+    ];
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
-      http.post(`${BASE}/api/jobs/send`, () =>
-        HttpResponse.json({ job_id: opts.jobId, status: 'queued' }, { status: 202 }),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({ address: 'abcd', assets }),
       ),
+      http.post(`${BASE}/api/jobs/send`, async ({ request }) => {
+        captured.sendBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({ job_id: opts.jobId, status: 'queued' }, { status: 202 });
+      }),
       http.post(`${BASE}/api/jobs/${opts.jobId}/commit`, async ({ request }) => {
         captured.commits.push(await request.json());
         phase = 'committed';
@@ -222,10 +386,13 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
     const account = await newAccount();
     expect(account.getNumPubkeys()).toBe(0);
 
-    const r = await account.pay(RECIPIENT, 100);
+    const r = await account.pay(RECIPIENT, 100, ASSET_ID);
     expect(r.jobId).toBe('send-1');
     expect(r.proofId).toBe(99);
     expect(account.getNumPubkeys()).toBe(1);
+
+    // The send body carries the asset_id (REQUIRED — no native asset).
+    expect(captured.sendBody?.asset_id).toBe(ASSET_ID);
 
     // The commit body carries proof_id + the ash||ocr message + a
     // Schnorr signature that verifies under the broadcast pubkey.
@@ -246,11 +413,11 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
   it('a second pay advances numPubkeys to 2 and signs at the next index', async () => {
     installSendLifecycle({ jobId: 'send-a' });
     const account = await newAccount();
-    await account.pay(RECIPIENT, 100);
+    await account.pay(RECIPIENT, 100, ASSET_ID);
     expect(account.getNumPubkeys()).toBe(1);
 
     const captured = installSendLifecycle({ jobId: 'send-b' });
-    await account.pay(RECIPIENT, 200);
+    await account.pay(RECIPIENT, 200, ASSET_ID);
     expect(account.getNumPubkeys()).toBe(2);
     // The second commit's pubkey is derived at index 1, not 0.
     const first = await newAccount();
@@ -270,14 +437,24 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
     expect(first.address).toBe(account.address);
   });
 
-  it('hydrates numPubkeys forward from the server num_sends (lost local state / multi-device)', async () => {
+  it('hydrates numPubkeys forward from the summed per-asset num_sends (lost local state / multi-device)', async () => {
     // Fresh in-memory account starts at 0, but the server reports this
-    // account has already done 3 sends. The thin-client invariant means
-    // pay() must derive + sign at index 3 (not 0) and advance to 4.
+    // wallet has already done 3 sends ACROSS assets (2 + 1). The global
+    // commitment SMT is keyed by pubkey, so the signing index is the SUM
+    // of every asset's num_sends — pay() must derive + sign at index 3
+    // (not 0, not the per-asset 1) and advance to 4.
     let phase: 'await' | 'committed' = 'await';
     let commitBody: { public_key: string } | null = null;
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 3 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [
+            { asset_id: ASSET_ID, balance: 10_000, num_sends: 2 },
+            { asset_id: 'bb'.repeat(32), balance: 500, num_sends: 1 },
+          ],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, () =>
         HttpResponse.json({ job_id: 'send-hyd', status: 'queued' }, { status: 202 }),
       ),
@@ -313,9 +490,9 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
     const account = await newAccount();
     expect(account.getNumPubkeys()).toBe(0);
 
-    await account.pay(RECIPIENT, 100);
+    await account.pay(RECIPIENT, 100, ASSET_ID);
 
-    // Hydrated to 3, derived/signed at index 3, then advanced to 4.
+    // Hydrated to 3 (2 + 1), derived/signed at index 3, then advanced to 4.
     expect(account.getNumPubkeys()).toBe(4);
     const { generateAccountKeysFromMnemonic, derivePublicKeys } =
       await import('../src/derivation.js');
@@ -328,7 +505,12 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
     let sendBody: Record<string, unknown> | null = null;
     let phase: 'await' | 'done' = 'await';
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 10_000, num_sends: 0 }],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, async ({ request }) => {
         sendBody = (await request.json()) as Record<string, unknown>;
         return HttpResponse.json({ job_id: 'send-sig', status: 'queued' }, { status: 202 });
@@ -356,7 +538,7 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
       ),
     );
     const account = await newAccount();
-    await account.pay(RECIPIENT, 5_000);
+    await account.pay(RECIPIENT, 5_000, ASSET_ID);
 
     const body = sendBody as unknown as {
       account_address: string;
@@ -379,7 +561,12 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
 
   it('throws (and does NOT advance numPubkeys) when the send job fails', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 10_000, num_sends: 0 }],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, () =>
         HttpResponse.json({ job_id: 'send-fail', status: 'queued' }, { status: 202 }),
       ),
@@ -392,13 +579,18 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
       ),
     );
     const account = await newAccount();
-    await expect(account.pay(RECIPIENT, 100)).rejects.toBeInstanceOf(JobFailedError);
+    await expect(account.pay(RECIPIENT, 100, ASSET_ID)).rejects.toBeInstanceOf(JobFailedError);
     expect(account.getNumPubkeys()).toBe(0);
   });
 
   it('fails hard when the awaiting_signature job omits ash/ocr (no fabricated commit)', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 10_000, num_sends: 0 }],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, () =>
         HttpResponse.json({ job_id: 'send-noash', status: 'queued' }, { status: 202 }),
       ),
@@ -410,13 +602,18 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
       ),
     );
     const account = await newAccount();
-    await expect(account.pay(RECIPIENT, 100)).rejects.toThrow(/account_state_hash/);
+    await expect(account.pay(RECIPIENT, 100, ASSET_ID)).rejects.toThrow(/account_state_hash/);
     expect(account.getNumPubkeys()).toBe(0);
   });
 
   it('throws if the send job completes before reaching awaiting_signature', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 10_000, num_sends: 0 }],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, () =>
         HttpResponse.json({ job_id: 'send-skip', status: 'queued' }, { status: 202 }),
       ),
@@ -429,13 +626,18 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
       ),
     );
     const account = await newAccount();
-    await expect(account.pay(RECIPIENT, 100)).rejects.toThrow(/before commit/);
+    await expect(account.pay(RECIPIENT, 100, ASSET_ID)).rejects.toThrow(/before commit/);
     expect(account.getNumPubkeys()).toBe(0);
   });
 
   it('fails when the awaiting_signature job omits proof_id', async () => {
     server.use(
-      http.get(`${BASE}/api/balance`, () => HttpResponse.json({ balance: 10_000, num_sends: 0 })),
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 10_000, num_sends: 0 }],
+        }),
+      ),
       http.post(`${BASE}/api/jobs/send`, () =>
         HttpResponse.json({ job_id: 'send-nopid', status: 'queued' }, { status: 202 }),
       ),
@@ -446,7 +648,41 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
         ),
       ),
     );
-    await expect((await newAccount()).pay(RECIPIENT, 100)).rejects.toThrow(/proof_id/);
+    await expect((await newAccount()).pay(RECIPIENT, 100, ASSET_ID)).rejects.toThrow(/proof_id/);
+  });
+
+  it('rejects before signing when the asset balance is insufficient', async () => {
+    let sendCalled = false;
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          assets: [{ asset_id: ASSET_ID, balance: 50, num_sends: 0 }],
+        }),
+      ),
+      http.post(`${BASE}/api/jobs/send`, () => {
+        sendCalled = true;
+        return HttpResponse.json({ job_id: 'x', status: 'queued' }, { status: 202 });
+      }),
+    );
+    const account = await newAccount();
+    await expect(account.pay(RECIPIENT, 100, ASSET_ID)).rejects.toThrow(/insufficient balance/);
+    expect(sendCalled).toBe(false);
+    expect(account.getNumPubkeys()).toBe(0);
+  });
+
+  it('treats an unheld asset as a zero balance (insufficient funds, no fallback)', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          // Holds a DIFFERENT asset; the requested ASSET_ID is absent → 0.
+          assets: [{ asset_id: 'bb'.repeat(32), balance: 10_000, num_sends: 0 }],
+        }),
+      ),
+    );
+    const account = await newAccount();
+    await expect(account.pay(RECIPIENT, 1, ASSET_ID)).rejects.toThrow(/insufficient balance/);
   });
 });
 
@@ -587,8 +823,25 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
       }),
     );
     const account = await newAccount();
-    const r = await account.waitForIncoming({ pollIntervalMs: 0 });
+    const r = await account.waitForIncoming(ASSET_ID, { pollIntervalMs: 0 });
     expect(r.balance).toBe(5_000);
+  });
+
+  it('queries the per-asset balance endpoint with address + asset_id', async () => {
+    let address = '';
+    let assetId = '';
+    server.use(
+      http.get(`${BASE}/api/balance`, ({ request }) => {
+        const params = new URL(request.url).searchParams;
+        address = params.get('address') ?? '';
+        assetId = params.get('asset_id') ?? '';
+        return HttpResponse.json({ balance: 9_000, num_sends: 0 });
+      }),
+    );
+    const account = await newAccount();
+    await account.waitForIncoming(ASSET_ID, { fromBalance: 0, pollIntervalMs: 0 });
+    expect(address).toBe(account.address);
+    expect(assetId).toBe(ASSET_ID);
   });
 
   it('uses an explicit fromBalance floor instead of re-reading the baseline', async () => {
@@ -602,7 +855,7 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
       }),
     );
     const account = await newAccount();
-    const r = await account.waitForIncoming({ fromBalance: 8_000, pollIntervalMs: 0 });
+    const r = await account.waitForIncoming(ASSET_ID, { fromBalance: 8_000, pollIntervalMs: 0 });
     expect(r.balance).toBe(9_000);
     // Exactly one balance call: the poll. No separate baseline fetch.
     expect(calls).toBe(1);
@@ -619,7 +872,7 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
     );
     const account = await newAccount();
     const seen: number[] = [];
-    await account.waitForIncoming({
+    await account.waitForIncoming(ASSET_ID, {
       fromBalance: 0,
       pollIntervalMs: 0,
       onPoll: (b) => seen.push(b.balance),
@@ -633,7 +886,7 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
     );
     const account = await newAccount();
     await expect(
-      account.waitForIncoming({ fromBalance: 0, pollIntervalMs: 0, timeoutMs: 30 }),
+      account.waitForIncoming(ASSET_ID, { fromBalance: 0, pollIntervalMs: 0, timeoutMs: 30 }),
     ).rejects.toThrow(/timed out/);
   });
 
@@ -645,7 +898,7 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
     const ctrl = new AbortController();
     ctrl.abort();
     await expect(
-      account.waitForIncoming({ fromBalance: 0, signal: ctrl.signal }),
+      account.waitForIncoming(ASSET_ID, { fromBalance: 0, signal: ctrl.signal }),
     ).rejects.toThrow();
   });
 
@@ -657,7 +910,11 @@ describe('ZkCoinsAccount.waitForIncoming', () => {
     const ctrl = new AbortController();
     setTimeout(() => ctrl.abort(), 10);
     await expect(
-      account.waitForIncoming({ fromBalance: 0, pollIntervalMs: 50, signal: ctrl.signal }),
+      account.waitForIncoming(ASSET_ID, {
+        fromBalance: 0,
+        pollIntervalMs: 50,
+        signal: ctrl.signal,
+      }),
     ).rejects.toThrow(/aborted/);
   });
 });

@@ -36,14 +36,19 @@ import { z } from 'zod';
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/balance?address=` — `router::BalanceResponse`.
+ * `GET /api/balance?address=&asset_id=` — `router::BalanceResponse`.
  *
- * `num_sends` is the authoritative BIP-32 child-index counter for the
- * account: the server always emits it (no `skip_serializing_if`), and
- * `0` is the canonical value for an account that has never sent. The
- * wallet hydrates its local `numPubkeys` from this value rather than
- * trusting local state. `username` is elided when the account has no
- * bound username (`skip_serializing_if = None`).
+ * Per-`(owner, asset_id)` balance (neutral multi-asset model, Model B).
+ * Both query params are now REQUIRED — there is no native/default asset,
+ * so a balance read must name the asset. For the cross-asset list use
+ * {@link OwnerBalanceResponseSchema} via `GET /api/balance/:address`.
+ *
+ * `num_sends` is the authoritative BIP-32 child-index counter for this
+ * `(owner, asset)` account: the server always emits it (no
+ * `skip_serializing_if`), and `0` is the canonical value for an account
+ * that has never sent. The wallet hydrates its local `numPubkeys` from
+ * this value rather than trusting local state. `username` is elided when
+ * the owner has no bound username (`skip_serializing_if = None`).
  */
 export const BalanceResponseSchema = z.object({
   balance: z.number(),
@@ -51,6 +56,38 @@ export const BalanceResponseSchema = z.object({
   num_sends: z.number(),
 });
 export type BalanceResponse = z.infer<typeof BalanceResponseSchema>;
+
+/**
+ * One asset entry of `GET /api/balance/:address` — `router::AssetBalance`.
+ *
+ * `name` and `decimals` are display metadata the node learned at mint
+ * time; both are elided (`skip_serializing_if = Option::is_none`) when
+ * unknown — e.g. an asset whose coins the owner only ever *received*
+ * (the receiving node never saw the genesis name/decimals). The
+ * `asset_id` is the trust anchor and is always present.
+ */
+export const AssetBalanceSchema = z.object({
+  asset_id: z.string(),
+  name: z.string().optional(),
+  decimals: z.number().optional(),
+  balance: z.number(),
+  num_sends: z.number(),
+});
+export type AssetBalance = z.infer<typeof AssetBalanceSchema>;
+
+/**
+ * `GET /api/balance/:address` — `router::OwnerBalanceResponse`. The
+ * cross-asset aggregation: every asset the owner holds, each with its
+ * own balance / num_sends / display metadata. An unobserved address
+ * returns `assets: []` (canonical, not a 404). `username` is elided when
+ * the owner has no bound username.
+ */
+export const OwnerBalanceResponseSchema = z.object({
+  address: z.string(),
+  username: z.string().optional(),
+  assets: z.array(AssetBalanceSchema),
+});
+export type OwnerBalanceResponse = z.infer<typeof OwnerBalanceResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Usernames
