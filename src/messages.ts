@@ -21,6 +21,8 @@
  * surface in their own test (not buried inside a Schnorr failure).
  */
 
+import { hexToBytes } from '@noble/hashes/utils.js';
+
 /** Inputs to a send signature — mirrors the wire types in the API. */
 export interface SendMessageParams {
   /** Sender address, hex-encoded (will be UTF-8 encoded here). */
@@ -39,6 +41,33 @@ export interface ClaimMessageParams {
   address: string;
   /** Username to claim. */
   username: string;
+  /** Unix timestamp in seconds. */
+  timestamp: number | bigint;
+}
+
+/**
+ * Inputs to a creator-signed mint signature (neutral multi-asset
+ * model: anyone mints their own asset; nobody can mint a foreign one).
+ *
+ * Mirrors `verify_mint_signature_pub` in `zk-coins/node`'s
+ * `router.rs`. Unlike the send / claim layouts — which UTF-8-encode
+ * the *hex string* of each address — the mint layout commits to the
+ * **raw bytes** of the compressed creator pubkey (33 bytes,
+ * hex-decoded here) and the raw UTF-8 of the asset `name`. The node
+ * re-derives the owner (`H(creator_pubkey)`) and the `asset_id`
+ * (`calculate_asset_id(creator_pubkey, H(name), decimals)`) from the
+ * same fields, so the signature binds the mint to one
+ * `(creator, name, decimals, amount)` tuple.
+ */
+export interface MintMessageParams {
+  /** Compressed secp256k1 creator pubkey — 33 bytes hex (66 chars). */
+  creatorPubkey: string;
+  /** Raw asset name (UTF-8); folded into the asset_id by the node. */
+  name: string;
+  /** Asset decimals — a single byte (`u8`). */
+  decimals: number;
+  /** Amount to mint into the creator's own balance, atomic units. */
+  amount: number | bigint;
   /** Unix timestamp in seconds. */
   timestamp: number | bigint;
 }
@@ -97,6 +126,61 @@ export function buildClaimMessage(params: ClaimMessageParams): Uint8Array {
   offset += addressBytes.length;
   out.set(usernameBytes, offset);
   offset += usernameBytes.length;
+  out.set(timestampBytes, offset);
+  return out;
+}
+
+/**
+ * Concatenate the creator-signed mint-message bytes — raw 33-byte
+ * compressed creator pubkey, raw UTF-8 asset name, one decimals byte,
+ * amount LE64, timestamp LE64 — in that order.
+ *
+ * Byte-for-byte mirror of `verify_mint_signature_pub` in
+ * `zk-coins/node`:
+ *
+ * ```text
+ * SHA256( creator_pubkey[33] ‖ name_utf8 ‖ decimals[1] ‖ amount_le[8] ‖ timestamp_le[8] )
+ * ```
+ *
+ * Note the asymmetry with {@link buildSendMessage}: the mint layout
+ * uses the **raw** pubkey/name bytes (the node hashes the same raw
+ * bytes into the owner + asset_id), whereas the send layout
+ * UTF-8-encodes the hex *string* of each address. Does **not** hash —
+ * the caller hashes + Schnorr-signs the digest with the creator key.
+ */
+export function buildMintMessage(params: MintMessageParams): Uint8Array {
+  const creatorBytes = hexToBytes(params.creatorPubkey);
+  if (creatorBytes.length !== 33) {
+    throw new Error(
+      `buildMintMessage: creatorPubkey must be a 33-byte compressed pubkey (66 hex chars), got ${creatorBytes.length} bytes`,
+    );
+  }
+  if (!Number.isInteger(params.decimals) || params.decimals < 0 || params.decimals > 255) {
+    throw new RangeError(
+      `buildMintMessage: decimals must be a single byte (integer 0–255), got ${params.decimals}`,
+    );
+  }
+  const nameBytes = new TextEncoder().encode(params.name);
+  const decimalsBytes = Uint8Array.of(params.decimals);
+  const amountBytes = uint64LE(params.amount);
+  const timestampBytes = uint64LE(params.timestamp);
+
+  const out = new Uint8Array(
+    creatorBytes.length +
+      nameBytes.length +
+      decimalsBytes.length +
+      amountBytes.length +
+      timestampBytes.length,
+  );
+  let offset = 0;
+  out.set(creatorBytes, offset);
+  offset += creatorBytes.length;
+  out.set(nameBytes, offset);
+  offset += nameBytes.length;
+  out.set(decimalsBytes, offset);
+  offset += decimalsBytes.length;
+  out.set(amountBytes, offset);
+  offset += amountBytes.length;
   out.set(timestampBytes, offset);
   return out;
 }

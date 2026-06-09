@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AddressesResponseSchema,
+  AssetBalanceSchema,
   BalanceResponseSchema,
   BitcoinNetworkSchema,
   CapabilitiesSchema,
@@ -17,8 +18,10 @@ import {
   JobStatusValueSchema,
   PublisherHealthResponseSchema,
   ReadyResponseSchema,
+  OwnerBalanceResponseSchema,
   ResolveUsernameResponseSchema,
   RootResponseSchema,
+  TxDetailSchema,
   TxItemSchema,
   UsernameResponseSchema,
 } from '../src/schemas.js';
@@ -46,6 +49,78 @@ describe('BalanceResponseSchema', () => {
 
   it('rejects wrong-type balance', () => {
     expect(() => BalanceResponseSchema.parse({ balance: '5', num_sends: 0 })).toThrow();
+  });
+});
+
+describe('AssetBalanceSchema', () => {
+  it('requires asset_id + balance + num_sends, allows name/decimals', () => {
+    expect(
+      AssetBalanceSchema.parse({
+        asset_id: 'aa',
+        name: 'Gold',
+        decimals: 8,
+        balance: 100,
+        num_sends: 2,
+      }),
+    ).toEqual({ asset_id: 'aa', name: 'Gold', decimals: 8, balance: 100, num_sends: 2 });
+  });
+
+  it('parses with name + decimals elided (received-only asset)', () => {
+    expect(AssetBalanceSchema.parse({ asset_id: 'bb', balance: 0, num_sends: 0 })).toEqual({
+      asset_id: 'bb',
+      balance: 0,
+      num_sends: 0,
+    });
+  });
+
+  it('rejects a missing asset_id (the trust anchor must be present)', () => {
+    expect(() => AssetBalanceSchema.parse({ balance: 0, num_sends: 0 })).toThrow();
+  });
+
+  it('rejects a missing num_sends', () => {
+    expect(() => AssetBalanceSchema.parse({ asset_id: 'cc', balance: 0 })).toThrow();
+  });
+
+  it('rejects a wrong-type decimals', () => {
+    expect(() =>
+      AssetBalanceSchema.parse({ asset_id: 'dd', decimals: '8', balance: 0, num_sends: 0 }),
+    ).toThrow();
+  });
+});
+
+describe('OwnerBalanceResponseSchema', () => {
+  it('parses an owner with multiple asset entries', () => {
+    const parsed = OwnerBalanceResponseSchema.parse({
+      address: 'abcd',
+      username: 'alice',
+      assets: [
+        { asset_id: 'aa', name: 'Gold', decimals: 8, balance: 100, num_sends: 1 },
+        { asset_id: 'bb', balance: 5, num_sends: 0 },
+      ],
+    });
+    expect(parsed.assets).toHaveLength(2);
+    expect(parsed.username).toBe('alice');
+  });
+
+  it('parses an unobserved address as an empty asset list, username elided', () => {
+    expect(OwnerBalanceResponseSchema.parse({ address: 'ef', assets: [] })).toEqual({
+      address: 'ef',
+      assets: [],
+    });
+  });
+
+  it('rejects a missing address', () => {
+    expect(() => OwnerBalanceResponseSchema.parse({ assets: [] })).toThrow();
+  });
+
+  it('rejects a missing assets array', () => {
+    expect(() => OwnerBalanceResponseSchema.parse({ address: 'ab' })).toThrow();
+  });
+
+  it('rejects an asset entry that violates AssetBalanceSchema', () => {
+    expect(() =>
+      OwnerBalanceResponseSchema.parse({ address: 'ab', assets: [{ balance: 0, num_sends: 0 }] }),
+    ).toThrow();
   });
 });
 
@@ -257,6 +332,70 @@ describe('TxItemSchema + HistoryResponseSchema', () => {
     });
     expect(r.items).toHaveLength(1);
     expect(r.total).toBe(1);
+  });
+});
+
+describe('TxDetailSchema', () => {
+  const fullMint = {
+    id: 119,
+    address: 'f1'.repeat(32),
+    txid: null,
+    timestamp: 1780823652,
+    direction: 'mint',
+    amount: 10000,
+    counterparty: null,
+    status: 'pending',
+    block_height: null,
+    memo: null,
+    balance_after: 10000,
+    balance_before: null,
+    num_sends_after: 0,
+    commitment_public_key: null,
+    circuit_digest: 'e05c08f4',
+    commit_output_value: null,
+  };
+
+  it('parses a from-genesis mint detail (all detail-only nullables null)', () => {
+    const r = TxDetailSchema.parse(fullMint);
+    expect(r.id).toBe(119);
+    expect(r.address).toBe('f1'.repeat(32));
+    expect(r.balance_after).toBe(10000);
+    expect(r.balance_before).toBeNull();
+    expect(r.num_sends_after).toBe(0);
+    expect(r.commitment_public_key).toBeNull();
+    expect(r.circuit_digest).toBe('e05c08f4');
+    expect(r.commit_output_value).toBeNull();
+  });
+
+  it('parses a confirmed send detail with every detail field populated', () => {
+    const r = TxDetailSchema.parse({
+      ...fullMint,
+      direction: 'send',
+      status: 'confirmed',
+      txid: 'ab'.repeat(32),
+      block_height: 900001,
+      amount: 6000,
+      balance_after: 4000,
+      balance_before: 10000,
+      num_sends_after: 1,
+      commitment_public_key: '02'.padEnd(66, 'a'),
+      commit_output_value: 546,
+    });
+    expect(r.direction).toBe('send');
+    expect(r.balance_before).toBe(10000);
+    expect(r.num_sends_after).toBe(1);
+    expect(r.commit_output_value).toBe(546);
+    expect(r.commitment_public_key).toHaveLength(66);
+  });
+
+  it('keeps the TxItem core contract (rejects a missing core field)', () => {
+    const { id: _omit, ...withoutId } = fullMint;
+    expect(() => TxDetailSchema.parse(withoutId)).toThrow();
+  });
+
+  it('rejects a missing detail-only field (the node emits all of them)', () => {
+    const { balance_after: _omit, ...withoutBalanceAfter } = fullMint;
+    expect(() => TxDetailSchema.parse(withoutBalanceAfter)).toThrow();
   });
 });
 

@@ -36,14 +36,19 @@ import { z } from 'zod';
 // ---------------------------------------------------------------------------
 
 /**
- * `GET /api/balance?address=` — `router::BalanceResponse`.
+ * `GET /api/balance?address=&asset_id=` — `router::BalanceResponse`.
  *
- * `num_sends` is the authoritative BIP-32 child-index counter for the
- * account: the server always emits it (no `skip_serializing_if`), and
- * `0` is the canonical value for an account that has never sent. The
- * wallet hydrates its local `numPubkeys` from this value rather than
- * trusting local state. `username` is elided when the account has no
- * bound username (`skip_serializing_if = None`).
+ * Per-`(owner, asset_id)` balance (neutral multi-asset model, Model B).
+ * Both query params are now REQUIRED — there is no native/default asset,
+ * so a balance read must name the asset. For the cross-asset list use
+ * {@link OwnerBalanceResponseSchema} via `GET /api/balance/:address`.
+ *
+ * `num_sends` is the authoritative BIP-32 child-index counter for this
+ * `(owner, asset)` account: the server always emits it (no
+ * `skip_serializing_if`), and `0` is the canonical value for an account
+ * that has never sent. The wallet hydrates its local `numPubkeys` from
+ * this value rather than trusting local state. `username` is elided when
+ * the owner has no bound username (`skip_serializing_if = None`).
  */
 export const BalanceResponseSchema = z.object({
   balance: z.number(),
@@ -51,6 +56,38 @@ export const BalanceResponseSchema = z.object({
   num_sends: z.number(),
 });
 export type BalanceResponse = z.infer<typeof BalanceResponseSchema>;
+
+/**
+ * One asset entry of `GET /api/balance/:address` — `router::AssetBalance`.
+ *
+ * `name` and `decimals` are display metadata the node learned at mint
+ * time; both are elided (`skip_serializing_if = Option::is_none`) when
+ * unknown — e.g. an asset whose coins the owner only ever *received*
+ * (the receiving node never saw the genesis name/decimals). The
+ * `asset_id` is the trust anchor and is always present.
+ */
+export const AssetBalanceSchema = z.object({
+  asset_id: z.string(),
+  name: z.string().optional(),
+  decimals: z.number().optional(),
+  balance: z.number(),
+  num_sends: z.number(),
+});
+export type AssetBalance = z.infer<typeof AssetBalanceSchema>;
+
+/**
+ * `GET /api/balance/:address` — `router::OwnerBalanceResponse`. The
+ * cross-asset aggregation: every asset the owner holds, each with its
+ * own balance / num_sends / display metadata. An unobserved address
+ * returns `assets: []` (canonical, not a 404). `username` is elided when
+ * the owner has no bound username.
+ */
+export const OwnerBalanceResponseSchema = z.object({
+  address: z.string(),
+  username: z.string().optional(),
+  assets: z.array(AssetBalanceSchema),
+});
+export type OwnerBalanceResponse = z.infer<typeof OwnerBalanceResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Usernames
@@ -187,6 +224,37 @@ export const HistoryResponseSchema = z.object({
   offset: z.number(),
 });
 export type HistoryResponse = z.infer<typeof HistoryResponseSchema>;
+
+/**
+ * `GET /api/history/{id}` — `router::TxDetail`. The full per-transaction
+ * detail: every `TxItem` core field plus the decoded account-state
+ * snapshot of the mutation, the verifier circuit digest, and the
+ * on-chain commit output value. `extend`s {@link TxItemSchema} so the
+ * shared core can never drift from the list shape.
+ *
+ * Detail-only fields, mirroring the node serde:
+ *  - `address` — the queried address, echoed lower-case hex (no `0x`).
+ *  - `balance_after` — usable balance (settled + queued) after the tx.
+ *  - `balance_before` — usable balance before; `null` on the first row.
+ *  - `num_sends_after` — the account's own-send counter after the tx
+ *    (the wallet's authoritative BIP-32 child index).
+ *  - `commitment_public_key` — 33-byte compressed secp256k1 pubkey
+ *    (hex); `null` before the account has ever sent.
+ *  - `circuit_digest` — the node's verifier circuit identity (hex);
+ *    `null` only pre-first-proof.
+ *  - `commit_output_value` — sats in the commit inscription output when
+ *    a publisher inscription exists; `null` otherwise.
+ */
+export const TxDetailSchema = TxItemSchema.extend({
+  address: z.string(),
+  balance_after: z.number(),
+  balance_before: z.number().nullable(),
+  num_sends_after: z.number(),
+  commitment_public_key: z.string().nullable(),
+  circuit_digest: z.string().nullable(),
+  commit_output_value: z.number().nullable(),
+});
+export type TxDetail = z.infer<typeof TxDetailSchema>;
 
 // ---------------------------------------------------------------------------
 // Jobs API (`/api/jobs/*`)

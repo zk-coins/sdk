@@ -136,16 +136,20 @@ describe('ZkCoinsClient.info', () => {
 });
 
 describe('ZkCoinsClient.balance', () => {
-  it('URL-encodes the address', async () => {
-    let observed = '';
+  it('URL-encodes the address and asset_id query params', async () => {
+    let address = '';
+    let assetId = '';
     server.use(
       http.get(`${BASE}/api/balance`, ({ request }) => {
-        observed = new URL(request.url).searchParams.get('address') ?? '';
+        const params = new URL(request.url).searchParams;
+        address = params.get('address') ?? '';
+        assetId = params.get('asset_id') ?? '';
         return HttpResponse.json({ balance: 1000, num_sends: 0 });
       }),
     );
-    await newClient().balance('aa bb');
-    expect(observed).toBe('aa bb');
+    await newClient().balance('aa bb', 'ff/00');
+    expect(address).toBe('aa bb');
+    expect(assetId).toBe('ff/00');
   });
 
   it('parses balance + num_sends + optional username', async () => {
@@ -154,10 +158,78 @@ describe('ZkCoinsClient.balance', () => {
         HttpResponse.json({ balance: 5000, username: 'alice', num_sends: 4 }),
       ),
     );
-    const r = await newClient().balance('abcdef');
+    const r = await newClient().balance('abcdef', 'aa'.repeat(32));
     expect(r.balance).toBe(5000);
     expect(r.username).toBe('alice');
     expect(r.num_sends).toBe(4);
+  });
+
+  it('forwards a caller-supplied abort signal', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ balance: 0, num_sends: 0 });
+      }),
+    );
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(newClient().balance('ab', 'cd', ctrl.signal)).rejects.toThrow();
+  });
+});
+
+describe('ZkCoinsClient.ownerBalances', () => {
+  it('hits /api/balance/:address with the address URL-encoded in the path', async () => {
+    let observed = '';
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, ({ params }) => {
+        observed = params.address as string;
+        return HttpResponse.json({ address: 'aa bb', assets: [] });
+      }),
+    );
+    await newClient().ownerBalances('aa bb');
+    expect(observed).toBe('aa bb');
+  });
+
+  it('parses a multi-asset response with display metadata + username', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({
+          address: 'abcd',
+          username: 'alice',
+          assets: [
+            { asset_id: 'aa', name: 'Gold', decimals: 8, balance: 100, num_sends: 2 },
+            { asset_id: 'bb', balance: 5, num_sends: 0 },
+          ],
+        }),
+      ),
+    );
+    const r = await newClient().ownerBalances('abcd');
+    expect(r.username).toBe('alice');
+    expect(r.assets).toHaveLength(2);
+    expect(r.assets[0]?.name).toBe('Gold');
+    expect(r.assets[1]?.name).toBeUndefined();
+  });
+
+  it('parses an unobserved address as an empty asset list', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, () =>
+        HttpResponse.json({ address: 'ef', assets: [] }),
+      ),
+    );
+    const r = await newClient().ownerBalances('ef');
+    expect(r.assets).toEqual([]);
+  });
+
+  it('forwards a caller-supplied abort signal', async () => {
+    server.use(
+      http.get(`${BASE}/api/balance/:address`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ address: 'ab', assets: [] });
+      }),
+    );
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(newClient().ownerBalances('ab', ctrl.signal)).rejects.toThrow();
   });
 });
 
@@ -218,8 +290,82 @@ describe('ZkCoinsClient.history', () => {
   });
 });
 
+describe('ZkCoinsClient.getTransaction', () => {
+  it('hits /api/history/{id} with the id in the path and address in the query', async () => {
+    let path: string | null = null;
+    let address: string | null = null;
+    server.use(
+      http.get(`${BASE}/api/history/:id`, ({ request, params }) => {
+        path = String(params.id);
+        address = new URL(request.url).searchParams.get('address');
+        return HttpResponse.json({
+          id: 119,
+          address: 'ab',
+          txid: null,
+          timestamp: 0,
+          direction: 'mint',
+          amount: 1000,
+          counterparty: null,
+          status: 'pending',
+          block_height: null,
+          memo: null,
+          balance_after: 1000,
+          balance_before: null,
+          num_sends_after: 0,
+          commitment_public_key: null,
+          circuit_digest: 'cd',
+          commit_output_value: null,
+        });
+      }),
+    );
+    await newClient().getTransaction(119, 'abcd');
+    expect(path).toBe('119');
+    expect(address).toBe('abcd');
+  });
+
+  it('parses the full TxDetail (decoded snapshot + proof fields)', async () => {
+    server.use(
+      http.get(`${BASE}/api/history/:id`, () =>
+        HttpResponse.json({
+          id: 7,
+          address: 'ee',
+          txid: 'abc',
+          timestamp: 100,
+          direction: 'send',
+          amount: 6000,
+          counterparty: null,
+          status: 'confirmed',
+          block_height: 900001,
+          memo: null,
+          balance_after: 4000,
+          balance_before: 10000,
+          num_sends_after: 1,
+          commitment_public_key: '02aa',
+          circuit_digest: 'cd',
+          commit_output_value: 546,
+        }),
+      ),
+    );
+    const d = await newClient().getTransaction(7, 'eeee');
+    expect(d.direction).toBe('send');
+    expect(d.balance_before).toBe(10000);
+    expect(d.num_sends_after).toBe(1);
+    expect(d.circuit_digest).toBe('cd');
+    expect(d.commit_output_value).toBe(546);
+  });
+
+  it('throws ApiError on a 404 (unknown / wrong-address row)', async () => {
+    server.use(
+      http.get(`${BASE}/api/history/:id`, () =>
+        HttpResponse.json({ error: 'Transaction not found' }, { status: 404 }),
+      ),
+    );
+    await expect(newClient().getTransaction(999, 'abcd')).rejects.toThrow(ApiError);
+  });
+});
+
 describe('ZkCoinsClient.mintJob', () => {
-  it('admits a mint job with the Idempotency-Key header and no asset_id', async () => {
+  it('admits a creator-signed mint job with the Idempotency-Key header', async () => {
     let body: Record<string, unknown> = {};
     let key = '';
     server.use(
@@ -229,24 +375,47 @@ describe('ZkCoinsClient.mintJob', () => {
         return HttpResponse.json({ job_id: 'job-1', status: 'queued' }, { status: 202 });
       }),
     );
-    const r = await newClient().mintJob({ account_address: 'ab', amount: 10_000 }, 'idem-key-1');
-    expect(body).toEqual({ account_address: 'ab', amount: 10_000 });
+    const req = {
+      creator_pubkey: '02' + 'ab'.repeat(32),
+      name: 'Gold',
+      decimals: 8,
+      amount: 10_000,
+      next_public_key: '03' + 'cd'.repeat(32),
+      signature: 'ee'.repeat(32),
+      timestamp: 1_717_000_000,
+    };
+    const r = await newClient().mintJob(req, 'idem-key-1');
+    expect(body).toEqual(req);
     expect(body).not.toHaveProperty('asset_id');
     expect(key).toBe('idem-key-1');
     expect(r.job_id).toBe('job-1');
     expect(r.status).toBe('queued');
   });
 
-  it('passes asset_id through when supplied', async () => {
-    let body: Record<string, unknown> = {};
+  it('forwards a caller-supplied abort signal', async () => {
     server.use(
-      http.post(`${BASE}/api/jobs/mint`, async ({ request }) => {
-        body = (await request.json()) as typeof body;
-        return HttpResponse.json({ job_id: 'job-2', status: 'queued' }, { status: 202 });
+      http.post(`${BASE}/api/jobs/mint`, async () => {
+        await new Promise(() => {});
+        return HttpResponse.json({ job_id: 'x', status: 'queued' }, { status: 202 });
       }),
     );
-    await newClient().mintJob({ account_address: 'ab', amount: 5, asset_id: 'ff'.repeat(32) }, 'k');
-    expect(body.asset_id).toBe('ff'.repeat(32));
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(
+      newClient().mintJob(
+        {
+          creator_pubkey: '02' + 'ab'.repeat(32),
+          name: 'X',
+          decimals: 0,
+          amount: 1,
+          next_public_key: '03' + 'cd'.repeat(32),
+          signature: 'ee',
+          timestamp: 1,
+        },
+        'k',
+        ctrl.signal,
+      ),
+    ).rejects.toThrow();
   });
 });
 
@@ -269,6 +438,7 @@ describe('ZkCoinsClient.sendJob', () => {
       next_public_key: 'dd',
       signature: 'ee',
       timestamp: 12345,
+      asset_id: 'ab'.repeat(32),
     };
     const r = await newClient().sendJob(req, 'send-key');
     expect(body).toEqual(req);
@@ -605,7 +775,7 @@ describe('ZkCoinsClient error handling', () => {
       ),
     );
     try {
-      await newClient().balance('zz');
+      await newClient().balance('zz', 'aa'.repeat(32));
       throw new Error('expected throw');
     } catch (e) {
       expect(e).toBeInstanceOf(ApiError);
@@ -620,7 +790,7 @@ describe('ZkCoinsClient error handling', () => {
     server.use(
       http.get(`${BASE}/api/balance`, () => new HttpResponse('plain text 502', { status: 502 })),
     );
-    await expect(newClient().balance('zz')).rejects.toMatchObject({
+    await expect(newClient().balance('zz', 'aa'.repeat(32))).rejects.toMatchObject({
       serverError: 'plain text 502',
     });
   });
@@ -630,7 +800,7 @@ describe('ZkCoinsClient error handling', () => {
       http.get(`${BASE}/api/balance`, () => HttpResponse.json({ status: 'down' }, { status: 503 })),
     );
     try {
-      await newClient().balance('zz');
+      await newClient().balance('zz', 'aa'.repeat(32));
       throw new Error('expected throw');
     } catch (e) {
       expect((e as ApiError).serverError).toContain('"status":"down"');

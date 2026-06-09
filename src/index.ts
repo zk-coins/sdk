@@ -20,11 +20,13 @@ export type { AccountKeys } from './derivation.js';
 export { signSchnorr, createCommitment } from './signing.js';
 export type { Commitment } from './signing.js';
 
-export { buildSendMessage, buildClaimMessage } from './messages.js';
-export type { SendMessageParams, ClaimMessageParams } from './messages.js';
+export { buildSendMessage, buildClaimMessage, buildMintMessage } from './messages.js';
+export type { SendMessageParams, ClaimMessageParams, MintMessageParams } from './messages.js';
 
 export {
   BalanceResponseSchema,
+  AssetBalanceSchema,
+  OwnerBalanceResponseSchema,
   UsernameResponseSchema,
   ClaimUsernameResponseSchema,
   ResolveUsernameResponseSchema,
@@ -33,6 +35,7 @@ export {
   InfoResponseSchema,
   TxItemSchema,
   HistoryResponseSchema,
+  TxDetailSchema,
   JobStatusValueSchema,
   JobKindSchema,
   JobAcceptedSchema,
@@ -49,6 +52,8 @@ export {
 } from './schemas.js';
 export type {
   BalanceResponse,
+  AssetBalance,
+  OwnerBalanceResponse,
   UsernameResponse,
   ClaimUsernameResponse,
   ResolveUsernameResponse,
@@ -57,6 +62,7 @@ export type {
   InfoResponse,
   TxItem,
   HistoryResponse,
+  TxDetail,
   JobStatusValue,
   JobKind,
   JobAccepted,
