@@ -32,14 +32,13 @@ Do not roll your own crypto. If a primitive is missing, add it via these librari
 ## Branch flow
 
 ```
-feature/* → staging → develop → main
+feature/* → develop → main
 ```
 
-- **Open feature PRs against `staging`** — `staging` is the integration buffer where multiple feature branches accumulate before being promoted in batches to `develop`.
-- **`develop` is auto-PR'd from `staging`** by `auto-release-pr-staging.yaml`. The Promote PR runs the slim CI (lint, typecheck, build, test, cross-tests).
+- **Always open feature PRs against `develop`.** There is **no `staging` branch** in this repo — feature branches merge directly into `develop` after review and the slim CI (lint, typecheck, build, test, cross-tests).
 - **`main` is auto-PR'd from `develop`** by `auto-release-pr.yaml`. The Release PR is what the maintainer merges to cut a release.
 - After `main` merges, tag the version (`git tag v0.1.0 && git push origin v0.1.0`) — that triggers `publish.yaml`, which runs the full gate one more time and publishes to npm with provenance.
-- `develop` and `main` reject direct pushes. Hotfixes still go through `staging`.
+- `develop` and `main` reject direct pushes. Hotfixes also go through a feature PR to `develop`.
 - Never force-push, never amend a published commit, never squash on the agent side — the maintainer squashes at merge time if needed.
 
 ## Test gates
