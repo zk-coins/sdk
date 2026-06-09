@@ -1,220 +1,134 @@
-# `@zkcoins/sdk`
+# zkCoins SDK
 
-Pure-TypeScript wallet SDK for [zkCoins](https://zkcoins.app). One package covers BIP-39 / BIP-32 derivation, BIP-340 Schnorr signing, the typed REST client for the **Jobs API** (`/api/jobs/*`), and a high-level account adapter that wallet integrators (Cake Wallet, Layerz Wallet, the in-tree web app) consume as a drop-in `InterfaceAccountBasedWallet`-style API.
+**Private Bitcoin payments via Shielded CSV** — no new chain, no token, no consensus change, no trusted operator. Only Bitcoin, zero-knowledge proofs, and the user's own keys.
 
-> Status: v0.3.0 — complete node-endpoint coverage (service/health probes, address list, inscription lookup, a `receive` polling helper). See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the workflow and [`CHANGELOG.md`](./CHANGELOG.md) for the change log.
+The **thin TypeScript client** for zkCoins: on-device BIP-39/32 key derivation and BIP-340 Schnorr signing, a typed REST client to a zkCoins node/API, and a high-level account adapter. Custody stays on the device.
 
-## Why pure TypeScript
+> Full system docs: **[docs.zkcoins.app](https://docs.zkcoins.app)** · Specification: **[docs.zkcoins.app/specification](https://docs.zkcoins.app/specification)**
 
-Earlier iterations of the wallet primitives were compiled to WASM from `zk-coins/app/rust/client/`. That works in the browser but creates friction for every other consumer — React Native (Layerz Wallet) struggles to bundle WASM cleanly, and Cake Wallet (Dart) cannot consume a WASM blob at all. The functions involved are all standard BIP-39 / BIP-32 / secp256k1 Schnorr / SHA-256 — every audited pure-JS library can do them. `@zkcoins/sdk` is the pure-JS replacement, so the same library runs identically in Node 22+, the browser, and React Native.
+## What zkCoins is
 
-## Install
+zkCoins lets you send value on Bitcoin without anyone seeing the amount, the asset, who paid, or who received. Bitcoin stores only opaque markers that a spend happened — not the coin's contents, which travel privately between sender and receiver as a small encrypted bundle. Double-spend protection is the chain's job; your seed derives every key, your wallet is the only thing that can spend, any node can serve you, and you verify everything against Bitcoin yourself. Built on the zkCoins concept (Robin Linus) and the Shielded CSV construction (Jonas Nick, Liam Eagen, Robin Linus).
+
+## The system, end to end
+
+| Layer                      | What it is                                                                     | Repo                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| **App · Explorer**         | end-user wallet (LNURL receive) · public explorer web-app                      | [`zk-coins/app`](https://github.com/zk-coins/app) · `zk-coins/explorer` _(planned)_                         |
+| **SDK**                    | thin TypeScript client — on-device keys, signing, node/API calls               | **[`zk-coins/sdk`](https://github.com/zk-coins/sdk)** ← this repo                                           |
+| **zkCoins API**            | public REST + LNURL, hosted-wallet service (optional)                          | currently in [`zk-coins/node`](https://github.com/zk-coins/node); a separate API layer is the target design |
+| **zkCoins node**           | trustless kernel — scan · accumulator · verify · prove · store · publisher     | [`zk-coins/node`](https://github.com/zk-coins/node)                                                         |
+| **bitcoind · Nostr relay** | Bitcoin L1 settlement and ordering · off-chain transport and data availability | upstream (own or external)                                                                                  |
+
+Supporting repos: [`zk-coins/research`](https://github.com/zk-coins/research), [`zk-coins/plonky2`](https://github.com/zk-coins/plonky2), [`zk-coins/docs`](https://github.com/zk-coins/docs).
+
+### Trust model — run your own node
+
+zkCoins follows the **Bitcoin full-node model: your wallet trusts _your_ node, exactly as a Bitcoin wallet trusts your own `bitcoind`.** Self-hosting (the `zk-coins/node` docker image) gives you trustlessness and privacy at once; the wallet must always be able to switch nodes by changing a single configuration value. Using someone else's node is a trade-off you choose — a foreign operator can never steal, forge, or double-spend your coins (enforced cryptographically), but it can see your privacy and affect liveness, the same spectrum as an Electrum/SPV server versus your own Bitcoin node. The thin client adds no anti-node logic: anything that exists to reduce trust in the node belongs node-side, or the answer is self-hosting. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full rule.
+
+## This repository (sdk)
+
+`@zkcoins/sdk` is the **pure-TypeScript** wallet SDK — no WASM, no native modules. It runs identically in Node 22+, modern browsers, and React Native (Expo + bare workflow), so the same package serves the in-tree web app, Cake Wallet, and Layerz Wallet. One package covers:
+
+- **On-device key material** — BIP-39 mnemonic, BIP-32 HD derivation, BIP-340 Schnorr signing. Crypto comes from audited upstreams (`@scure/bip39`, `@scure/bip32`, `@noble/curves`, `@noble/hashes`) — no rolled crypto. The private key never leaves the wallet.
+- **`ZkCoinsClient`** — a typed REST client to a zkCoins node/API that mirrors every node endpoint a wallet legitimately reads or drives. Each response is validated against a Zod schema; a non-2xx maps onto a typed `ApiError` with no silent fallback.
+- **`ZkCoinsAccount`** — the high-level account adapter most integrators consume. It derives the account from a mnemonic and drives the full async **Jobs API** lifecycle (`/api/jobs/*`) for mint/send, polling jobs to completion for you.
+
+### Install
 
 ```bash
 npm install @zkcoins/sdk
 ```
 
-## Quick start
+### Quick start
 
 ```ts
 import { ZkCoinsAccount, generateMnemonic } from '@zkcoins/sdk';
 
-// 1. Create or restore an account. With no `apiUrl` passed the SDK
-//    talks to `https://api.zkcoins.app`; pass `{ apiUrl: '...' }`
-//    to point at any other node — see "Choosing a node" below.
+// Create or restore an account. With no `apiUrl` the SDK talks to
+// `https://api.zkcoins.app`; pass `{ apiUrl: '...' }` to point at any
+// other node (your own self-hosted node, or another operator).
 const mnemonic = await generateMnemonic();
 const account = await ZkCoinsAccount.fromMnemonic(mnemonic, /* accountIndex */ 0);
 
-// 2. Read authoritative state from the server.
+// Read authoritative state from the node.
 const { balance, username, num_sends } = await account.getBalance();
-console.warn('balance:', balance, 'sats; username:', username, '; sends:', num_sends);
 
-// 3. Mint (DEV faucet / authorised issuance). Mint is fully
-//    server-mediated — the SDK admits the job and polls it to
-//    completion for you. Throws `JobFailedError` if the job fails.
+// Mint (server-mediated: DEV faucet / authorised issuance). The SDK
+// admits the job and polls it to completion; throws on failure.
 const mint = await account.mint(/* amountSats */ 10_000);
-console.warn('mint proof id:', mint.proofId);
 
-// 4. Send. `pay()` runs the whole send → commit lifecycle:
-//    refresh balance → sign → admit job → poll to awaiting_signature
-//    → sign the commitment → commit → poll to completed.
+// Send. `pay()` runs the whole send → commit lifecycle: refresh
+// balance → sign → admit job → poll to awaiting_signature → sign the
+// commitment → commit → poll to completed.
 const result = await account.pay(/* recipient */ recipientHex, /* amountSats */ 5_000);
-console.warn('send proof id:', result.proofId);
 
-// 5. History.
+// History.
 const { items, total } = await account.getTransactions({ limit: 50 });
-console.warn(`${items.length} of ${total} transactions`);
 ```
 
-## The Jobs API
+A runnable end-to-end example (account creation, node + health probes, mint, history, signed username claim) lives in [`examples/basic.ts`](./examples/basic.ts):
 
-Mint / send / commit are **asynchronous jobs** on the node (`/api/jobs/*`); the old synchronous `/api/{mint,send,commit}` routes were removed node-side. A job moves through:
-
-```
-queued → proving → [awaiting_signature → broadcasting] → completed | failed | cancelled
-```
-
-`ZkCoinsAccount.mint()` / `.pay()` drive the whole lifecycle and poll for you. If you compose the lower-level `ZkCoinsClient` directly, the building blocks are:
-
-```ts
-const idem = newIdempotencyKey(); // reuse across retries of one logical op
-
-// Admit (Idempotency-Key is mandatory on mint/send).
-const { job_id } = await client.mintJob({ account_address, amount }, idem);
-
-// Poll (respects the node's Retry-After backoff).
-const { status, retryAfterMs } = await client.getJobWithRetry(job_id);
-
-// Or stream transitions over SSE (falls back to polling where SSE
-// is unavailable). The generator ends after the terminal frame.
-for await (const frame of client.streamJob(job_id)) {
-  console.warn(frame.status, frame.phase);
-}
-
-// Send-only: attach the wallet-signed commitment once the job parks
-// in awaiting_signature, then poll to completed.
-await client.commitJob(job_id, { proof_id, public_key, signature, message });
-
-// Cancel a still-queued job.
-await client.cancelJob(job_id);
+```bash
+npx tsx examples/basic.ts                          # uses the fallback URL
+ZKCOINS_API_URL=https://dev-api.zkcoins.app \
+  npx tsx examples/basic.ts                        # point at the DEV node
 ```
 
-### `asset_id` (multi-asset)
+The high-level `ZkCoinsAccount` is the recommended entry point (`getBalance`, `mint`, `pay`, `getTransactions`, `waitForIncoming`, `claimUsername`/`resolveUsername`). The lower-level `ZkCoinsClient` (also `account.client`) exposes every node route — service/health probes, `info`, `balance`, `history`, `addresses`, `inscription`, username resolve/claim, and the Jobs API (`mintJob`/`sendJob`/`getJob`/`commitJob`/`cancelJob`/`streamJob`). All exported types and helpers (Zod schemas, `ApiError`/`JobFailedError`, `newIdempotencyKey`, key-derivation and signing primitives) are listed in [`src/index.ts`](./src/index.ts).
 
-`mint(amountSats, assetId?)` and `pay(recipient, amountSats, assetId?)` take an optional 32-byte-hex `asset_id`. Omit it for the native asset. A present-but-malformed value is rejected by the node (`422`) — there is no silent fallback to native. Gate the UI on `info.capabilities.multi_asset`.
+A few design points worth knowing up front:
 
-### `bitcoin_network`
+- **Jobs are asynchronous.** Mint/send/commit are jobs (`queued → proving → [awaiting_signature → broadcasting] → completed | failed | cancelled`); `account.mint()`/`account.pay()` poll the lifecycle for you.
+- **Receiving has no client call** — share `account.address` and the sender's `pay()` credits it server-side; poll with `getBalance()`/`getTransactions()` or the `waitForIncoming()` helper.
+- **No client-side fees.** Send/inscription fees are paid server-side from the operator-funded publisher wallet; the SDK fabricates no fee estimate.
+- **No local state.** The SDK persists nothing — mnemonic storage, address book, and transaction cache are the integrating wallet's responsibility.
 
-`info()` returns a typed `bitcoin_network` (`'mainnet' | 'mutinynet'`) for behaviour switches — prefer it over the free-text, operator-overridable `network` label. It is optional for forward/backward compatibility: a node that predates it simply omits the field, and clients fall back to matching `network`.
+### Choosing a node
 
-## Choosing a node
-
-`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The constructor parameter is how you tell the SDK which node to talk to:
+`@zkcoins/sdk` is a **protocol SDK**, not a service SDK. The constructor parameter is how you tell it which node to talk to:
 
 ```ts
 new ZkCoinsClient({ apiUrl: 'https://...' });
 ZkCoinsAccount.fromMnemonic(mnemonic, 0, { apiUrl: 'https://...' });
 ```
 
-When `apiUrl` is omitted, the SDK falls back to `https://api.zkcoins.app`. The SDK does **not** read environment variables, config files, or any other ambient state — where you source the URL from (env, config-file, hardcoded, CLI arg) is your app's concern.
-
-[zkcoins.app](https://zkcoins.app) is one such operator (one of hopefully many). It runs two public stages today:
+When `apiUrl` is omitted, the SDK falls back to `https://api.zkcoins.app`. It reads no environment variables or config files itself — where you source the URL from is your app's concern. [zkcoins.app](https://zkcoins.app) is one operator (one of hopefully many), running two public stages today:
 
 | URL                           | Bitcoin network | Notes                                                        |
 | ----------------------------- | --------------- | ------------------------------------------------------------ |
 | `https://api.zkcoins.app`     | Mainnet         | Production. No faucet — mint requires real on-chain funding. |
 | `https://dev-api.zkcoins.app` | Mutinynet       | DEV. Open mint faucet, signet-grade reorgs, no real value.   |
 
-Self-hosters point `apiUrl` at their own node (`zk-coins/node` docker image). Wallet integrators typically expose a chooser in their own config; the SDK stays opinion-free on which node is "the right one".
+Self-hosters point `apiUrl` at their own `zk-coins/node` instance.
 
-## API surface
+### Build · test · develop
 
-The `ZkCoinsAccount` class is the recommended entry point:
+```bash
+npm run build           # tsup → dist/ (ESM + CJS + .d.ts)
+npm run typecheck       # tsc --noEmit
+npm run lint            # eslint --max-warnings 0 && prettier --check
+npm run lint:fix        # eslint --fix && prettier --write
 
-```ts
-class ZkCoinsAccount {
-  static fromMnemonic(
-    mnemonic: string,
-    accountIndex: number,
-    opts?: { apiUrl?: string; passphrase?: string },
-  ): Promise<ZkCoinsAccount>;
-
-  readonly address: string;
-  readonly client: ZkCoinsClient;
-
-  getBalance(): Promise<{ balance: number; username?: string; num_sends: number }>;
-  mint(amountSats: number, assetId?: string): Promise<MintResult>;
-  pay(recipient: string, amountSats: number, assetId?: string): Promise<PayResult>;
-  getTransactions(opts?: HistoryOpts): Promise<HistoryResponse>;
-  // Receiving: share `address`, then poll for the credit (see "Receiving").
-  waitForIncoming(opts?: WaitForIncomingOpts): Promise<BalanceResponse>;
-  waitForJob(
-    jobId: string,
-    stopAt: ReadonlySet<JobStatus['status']>,
-    opts?: WaitForJobOpts,
-  ): Promise<JobStatus>;
-  claimUsername(username: string): Promise<UsernameResponse>;
-  resolveUsername(username: string): Promise<UsernameResponse>;
-
-  getNumPubkeys(): number;
-  setNumPubkeys(value: number): void; // e.g. setNumPubkeys(balance.num_sends)
-}
+npm run test            # vitest unit tests
+npm run test:coverage   # 100% lines/functions/statements coverage gate on src/*
+npm run test:cross      # JS-vs-Rust cross-tests — the load-bearing guarantee
+                        # the pure-JS reimpl matches the protocol spec
 ```
 
-### `ZkCoinsClient` — full endpoint reference
+### Branch flow
 
-The lower-level `ZkCoinsClient` (also `account.client`) mirrors **every** node endpoint a wallet legitimately reads or drives. Each method validates the response against a Zod schema and maps a non-2xx onto `ApiError` (no silent fallback).
-
-| Method                               | Node route                       | Returns                     |
-| ------------------------------------ | -------------------------------- | --------------------------- |
-| `root()`                             | `GET /`                          | `RootResponse`              |
-| `health()`                           | `GET /health`                    | `string` (`"ok"`)           |
-| `ready()`                            | `GET /health/ready`              | `ReadyResponse`¹            |
-| `publisherHealth()`                  | `GET /health/publisher`          | `PublisherHealthResponse`   |
-| `info()`                             | `GET /api/info`                  | `InfoResponse`              |
-| `balance(address)`                   | `GET /api/balance`               | `BalanceResponse`           |
-| `history(address, opts?)`            | `GET /api/history`               | `HistoryResponse`           |
-| `addresses()`                        | `GET /api/address`²              | `AddressesResponse`         |
-| `inscription(txid)`                  | `GET /api/inscriptions/:txid`    | `InscriptionSummary`        |
-| `resolveUsername(name)`              | `GET /api/username/resolve/:u`   | `ResolveUsernameResponse`   |
-| `claimUsername(signedReq)`           | `POST /api/username/claim`²      | `ClaimUsernameResponse`     |
-| `mintJob(req, idem)`                 | `POST /api/jobs/mint`            | `JobAccepted`               |
-| `sendJob(signedReq, idem)`           | `POST /api/jobs/send`            | `JobAccepted`               |
-| `getJob(id)` / `getJobWithRetry(id)` | `GET /api/jobs/:id`              | `JobStatus` (+ retry)       |
-| `commitJob(id, req)`                 | `POST /api/jobs/:id/commit`      | `void`                      |
-| `cancelJob(id)`                      | `POST /api/jobs/:id/cancel`      | `void`                      |
-| `streamJob(id)`                      | `GET /api/jobs/:id/stream` (SSE) | `AsyncGenerator<JobStatus>` |
-
-¹ `ready()` returns the body for **both** the 200 (ready) and 503 (not-ready) branches — a not-ready node is a valid readiness answer, not a transport error. Read `result.ready` / `result.failures`. Any other non-2xx still throws `ApiError`.
-² Feature-gated node-side (`address-list` / `username-claim` Cargo features). Gate the call on `info().capabilities.address_list` / `.username_claim`; a build without the feature 404s the route.
-
-**Deliberately not exposed:**
-
-- `GET /api/proof/:id` returns a **binary bincode `CoinProof`** blob. A pure-TS SDK does not decode bincode, and the wallet does not need to: it reads `account_state_hash` / `output_coins_root` from the `awaiting_signature` job result to build the commitment, never from the proof blob. Mirroring this as a method would require either a bincode decoder or a fake — neither is acceptable, so it is omitted.
-- `POST /api/receive` is a legacy octet-stream route, not a wallet operation — see **Receiving** below.
-- `GET /api/admin/r2-probe/history` is an operator telemetry endpoint, out of wallet-SDK scope.
-
-Other building blocks are exported too (custom signing flows, key-derivation helpers, every Zod schema + typed error, and `newIdempotencyKey`).
-
-## Receiving
-
-There is **no client-initiated "receive" call**, by design. A zkCoins account receives by sharing its `address` — the sender's `pay()` credits it server-side. (The node's `POST /api/receive` is internal plumbing, not a wallet method, and is intentionally not mirrored here.)
-
-To observe an incoming credit, poll the authoritative balance / history:
-
-```ts
-// Share this with the sender:
-console.warn('my address:', account.address);
-
-// Option A — your own loop over getBalance() / getTransactions().
-// Option B — the built-in convenience helper (pure getBalance() on a
-// timer; no signing, no extra trust assumption):
-const updated = await account.waitForIncoming({ timeoutMs: 120_000 });
-console.warn('received! new balance:', updated.balance);
+```
+feature/* → develop → main
 ```
 
-`waitForIncoming` reads the current balance as a baseline (or takes an explicit `fromBalance`), then polls until the balance rises above it, resolving with the updated `BalanceResponse`. It **throws** on timeout rather than returning a stale balance.
-
-## Fees
-
-zkCoins has **no client-side fee estimation, and the SDK fabricates none.** The node exposes no fee-estimation endpoint:
-
-- **Mint** amounts are server-controlled (DEV faucet / authorised issuance).
-- **Send / inscription fees** are paid server-side from the operator-funded publisher wallet — the wallet never constructs or signs a Bitcoin fee.
-
-The only fee-relevant figure the node surfaces is the publisher wallet's UTXO state via `client.publisherHealth()` (`{ address, utxo_count, total_sats }`); a depleting `total_sats` is the observable fee-spend signal. There is deliberately no `fees()` method — adding one would mean inventing a number the node does not provide.
+Open feature PRs against **`develop`** — there is no `staging` branch. `main` is auto-PR'd from `develop`; the maintainer merges the release PR and tags the version, which triggers `publish.yaml` to ship `@zkcoins/sdk` to npm with OIDC provenance. `develop` and `main` reject direct pushes. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full workflow, test gates, and code style.
 
 ## Compatibility
 
 - Node 22+ (no native dependencies; runs in Bun, Deno, AWS Lambda, etc.).
 - All evergreen browsers (Web Crypto + standard `fetch` + `ReadableStream` for SSE).
 - React Native (Expo + bare workflow). `newIdempotencyKey()` uses `@noble/hashes` `randomBytes`, not `crypto.randomUUID`, so it works where the latter is absent.
-
-## Wallet integrator notes
-
-- **Thin-client invariant.** Before every signed request the server is the source of truth. `ZkCoinsAccount.pay()` enforces this by calling `getBalance()` first internally — replicate that if you build a flow on the lower-level client.
-- **No local state.** The SDK persists nothing. Mnemonic storage, address book, transaction cache — all handled by the integrating wallet. Re-hydrate `numPubkeys` from `balance().num_sends`.
-- **No silent fallback.** A malformed response hard-fails at the schema boundary (`ZodError`); a failed/cancelled job throws `JobFailedError`.
 
 ## License
 
@@ -223,5 +137,5 @@ MIT.
 ## See also
 
 - [zk-coins/node](https://github.com/zk-coins/node) — the Rust backend serving `/api/*`.
-- [zk-coins/app](https://github.com/zk-coins/app) — the reference web wallet (will migrate to `@zkcoins/sdk` as a follow-up).
-- [zk-coins/docs](https://docs.zkcoins.app) — protocol documentation.
+- [zk-coins/app](https://github.com/zk-coins/app) — the reference web wallet.
+- [docs.zkcoins.app](https://docs.zkcoins.app) — protocol documentation and specification.
