@@ -11,13 +11,13 @@ If you discover a security vulnerability in zkCoins, please report it responsibl
 
 ## Scope
 
-| Component                              | In Scope |
-| -------------------------------------- | -------- |
-| Key derivation (BIP-39 / BIP-32)       | Yes      |
-| Schnorr signing (BIP-340)              | Yes      |
-| REST client / node communication       | Yes      |
-| High-level account adapter             | Yes      |
-| Examples                               | No       |
+| Component                                                            | In Scope     |
+| -------------------------------------------------------------------- | ------------ |
+| Key derivation (BIP-39 / BIP-32)                                     | Yes          |
+| Schnorr signing (BIP-340)                                            | Yes          |
+| REST client / node communication                                     | Yes          |
+| High-level account adapter                                           | Yes          |
+| Examples                                                             | No           |
 | Node backend (see [zk-coins/node](https://github.com/zk-coins/node)) | Report there |
 
 ## Supported Versions
