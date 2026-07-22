@@ -597,7 +597,7 @@ describe('RootResponseSchema', () => {
       version: '1.1.0',
       network: 'Mutinynet',
       endpoints,
-      docs: 'https://docs.zkcoins.app',
+      docs: 'https://docs.zkcoins.com',
     });
     expect(r.service).toBe('zkcoins-node');
     expect(r.endpoints.health_publisher).toBe('GET  /health/publisher');
@@ -612,7 +612,7 @@ describe('RootResponseSchema', () => {
         version: '1.1.0',
         network: 'Mutinynet',
         endpoints: incomplete,
-        docs: 'https://docs.zkcoins.app',
+        docs: 'https://docs.zkcoins.com',
       }),
     ).toThrow();
   });
