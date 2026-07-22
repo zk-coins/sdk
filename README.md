@@ -4,7 +4,7 @@
 
 The **thin TypeScript client** for zkCoins: on-device BIP-39/32 key derivation and BIP-340 Schnorr signing, a typed REST client to a zkCoins node/API, and a high-level account adapter. Custody stays on the device.
 
-> Full system docs: **[docs.zkcoins.app](https://docs.zkcoins.app)** · Specification: **[docs.zkcoins.app/specification](https://docs.zkcoins.app/specification)**
+> Full system docs: **[docs.zkcoins.com](https://docs.zkcoins.com)** · Specification: **[docs.zkcoins.com/specification](https://docs.zkcoins.com/specification)**
 
 ## What zkCoins is
 
@@ -138,4 +138,4 @@ MIT.
 
 - [zk-coins/node](https://github.com/zk-coins/node) — the Rust backend serving `/api/*`.
 - [zk-coins/app](https://github.com/zk-coins/app) — the reference web wallet.
-- [docs.zkcoins.app](https://docs.zkcoins.app) — protocol documentation and specification.
+- [docs.zkcoins.com](https://docs.zkcoins.com) — protocol documentation and specification.

@@ -866,7 +866,7 @@ describe('ZkCoinsClient.root', () => {
       openapi: 'GET  /openapi.json',
       docs: 'GET  /docs',
     },
-    docs: 'https://docs.zkcoins.app',
+    docs: 'https://docs.zkcoins.com',
   };
 
   it('parses the service-info envelope', async () => {
@@ -875,7 +875,7 @@ describe('ZkCoinsClient.root', () => {
     expect(r.service).toBe('zkcoins-node');
     expect(r.network).toBe('Mutinynet');
     expect(r.endpoints.health_ready).toBe('GET  /health/ready');
-    expect(r.docs).toBe('https://docs.zkcoins.app');
+    expect(r.docs).toBe('https://docs.zkcoins.com');
   });
 
   it('throws ZodError when a required endpoints field is missing', async () => {
