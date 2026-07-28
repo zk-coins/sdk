@@ -1,0 +1,21 @@
+[package]
+name = "zkcoins-sdk-shim"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "JSON-stdin CLI: independent Rust reimplementation of SDK crypto surface for JS↔Rust parity"
+
+[[bin]]
+name = "zkcoins-sdk-shim"
+path = "src/main.rs"
+
+[dependencies]
+# Match versions used by zk-coins/app/rust (workspace bitcoin 0.32.5) so
+# BIP-32 / BIP-340 behaviour is byte-equivalent to the historical WASM
+# reference that the pure-JS SDK was written against.
+bitcoin = { version = "0.32.5", features = ["rand", "rand-std"] }
+bip39 = "2"
+hex = "0.4.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.8"
