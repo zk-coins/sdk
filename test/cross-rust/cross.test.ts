@@ -66,7 +66,9 @@ class XorShift32 {
 
   bytes(byteLen: number): Uint8Array {
     if (!Number.isInteger(byteLen) || byteLen < 0) {
-      throw new Error(`XorShift32.bytes: byteLen must be a non-negative integer, got ${String(byteLen)}`);
+      throw new Error(
+        `XorShift32.bytes: byteLen must be a non-negative integer, got ${String(byteLen)}`,
+      );
     }
     const out = new Uint8Array(byteLen);
     for (let i = 0; i < byteLen; i++) {
@@ -86,7 +88,10 @@ function resolvePrngSeed(): number {
       'CROSS_RUST_SEED is set but empty. Unset it for the default seed, or supply an unsigned 32-bit integer (decimal or 0x-hex).',
     );
   }
-  const parsed = raw.startsWith('0x') || raw.startsWith('0X') ? Number.parseInt(raw, 16) : Number.parseInt(raw, 10);
+  const parsed =
+    raw.startsWith('0x') || raw.startsWith('0X')
+      ? Number.parseInt(raw, 16)
+      : Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 0xffff_ffff) {
     throw new Error(
       `CROSS_RUST_SEED must be an unsigned 32-bit integer (decimal or 0x-hex); got ${JSON.stringify(raw)}`,
@@ -145,7 +150,7 @@ function callShim(request: Record<string, unknown>): unknown {
   try {
     parsed = JSON.parse(line) as ShimResult;
   } catch (e) {
-    throw new Error(`shim stdout is not JSON: ${line} (${String(e)})`);
+    throw new Error(`shim stdout is not JSON: ${line} (${String(e)})`, { cause: e });
   }
   if (!parsed.ok) {
     throw new Error(`shim error for op=${String(request.op)}: ${parsed.error}`);
@@ -290,9 +295,10 @@ describe('cross-rust: randomized parity (100 samples per op)', () => {
         xpriv: keys.xpriv,
         num_pubkeys: index,
       });
-      expect(pubsRust, `pubs sample ${i} seed=${PRNG_SEED} index=${index} xpriv=${keys.xpriv}`).toEqual(
-        pubsJs,
-      );
+      expect(
+        pubsRust,
+        `pubs sample ${i} seed=${PRNG_SEED} index=${index} xpriv=${keys.xpriv}`,
+      ).toEqual(pubsJs);
 
       const skJs = await deriveSigningKey(keys.xpriv, index);
       const skRust = callShim({
@@ -300,7 +306,9 @@ describe('cross-rust: randomized parity (100 samples per op)', () => {
         xpriv: keys.xpriv,
         index,
       });
-      expect(skRust, `sk sample ${i} seed=${PRNG_SEED} index=${index} xpriv=${keys.xpriv}`).toBe(skJs);
+      expect(skRust, `sk sample ${i} seed=${PRNG_SEED} index=${index} xpriv=${keys.xpriv}`).toBe(
+        skJs,
+      );
     }
   });
 

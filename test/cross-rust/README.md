@@ -8,11 +8,11 @@ implementation.
 
 ## What runs
 
-| Piece | Role |
-| --- | --- |
-| `shim/` | Standalone JSON-stdin CLI (`zkcoins-sdk-shim`) using real `bitcoin` / `bip39` / `sha2` crates (same versions as `zk-coins/app/rust`). **Not a mock.** |
-| `cross.test.ts` | Spawns the release binary and compares JS vs Rust for each op on 100 randomized inputs (plus fixed vectors). |
-| `npm run test:cross` | Vitest config `vitest.cross.config.ts`. CI job `cross-tests` builds the shim then runs this. |
+| Piece                | Role                                                                                                                                                  |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shim/`              | Standalone JSON-stdin CLI (`zkcoins-sdk-shim`) using real `bitcoin` / `bip39` / `sha2` crates (same versions as `zk-coins/app/rust`). **Not a mock.** |
+| `cross.test.ts`      | Spawns the release binary and compares JS vs Rust for each op on 100 randomized inputs (plus fixed vectors).                                          |
+| `npm run test:cross` | Vitest config `vitest.cross.config.ts`. CI job `cross-tests` builds the shim then runs this.                                                          |
 
 ## Scope decision (documented — Spec leaves the live surface open)
 
@@ -21,13 +21,13 @@ row in the matrix that the **SDK actually implements**. Today the
 published SDK surface is the legacy wallet primitives in
 `src/derivation.ts` and `src/signing.ts`:
 
-| Op | Spec / V.7 link | Criterion |
-| --- | --- | --- |
-| BIP-39 validate / entropy→mnemonic | V.2 foundation | byte-equal phrase |
-| BIP-39 mnemonic → BIP-32 master xpriv + address | V.2 / historical wallet | byte-equal `address`, `xpriv` |
-| Non-hardened child pubkeys / signing key | wallet surface | byte-equal SEC1 / sk |
-| BIP-340 Schnorr (`no_aux_rand`) | V.5/V.8 signing layer | byte-equal sig |
-| `createCommitment` (ash‖ocr → SHA-256 → sign) | historical two-phase send | byte-equal commitment |
+| Op                                              | Spec / V.7 link           | Criterion                     |
+| ----------------------------------------------- | ------------------------- | ----------------------------- |
+| BIP-39 validate / entropy→mnemonic              | V.2 foundation            | byte-equal phrase             |
+| BIP-39 mnemonic → BIP-32 master xpriv + address | V.2 / historical wallet   | byte-equal `address`, `xpriv` |
+| Non-hardened child pubkeys / signing key        | wallet surface            | byte-equal SEC1 / sk          |
+| BIP-340 Schnorr (`no_aux_rand`)                 | V.5/V.8 signing layer     | byte-equal sig                |
+| `createCommitment` (ash‖ocr → SHA-256 → sign)   | historical two-phase send | byte-equal commitment         |
 
 **Not parity-checked — raw 32-byte `account_from_seed`.** The SDK keeps
 `accountFromSeed` private; the public surface only exposes CSPRNG
