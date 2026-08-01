@@ -25,4 +25,26 @@ describe('package barrel exports', () => {
     const client = new sdk.ZkCoinsClient({ apiUrl: 'http://node.test' });
     expect(typeof client.getTransaction).toBe('function');
   });
+
+  it('re-exports the v1 transition-signing surface as runtime values', () => {
+    for (const name of [
+      'mStateBytes',
+      'serializeProofData',
+      'hashProofData',
+      'signTransition',
+      'signTransitionWithFixtureNonce',
+      'verify',
+      'commVerify',
+      'aggregateSig',
+      'aggregateVerify',
+      'deriveSpendKey',
+      'freshNpkRand',
+      'refuseOrSignTransition',
+      'chanBindForHost',
+      'ZkCoinsV1Client',
+    ] as const) {
+      expect(sdk[name], `${name} must be exported from the package root`).toBeDefined();
+      expect(typeof sdk[name]).toBe('function');
+    }
+  });
 });

@@ -24,6 +24,16 @@ import {
   validateMnemonic,
 } from '../../src/derivation.js';
 import { createCommitment, signSchnorr } from '../../src/signing.js';
+import {
+  aggregateSig,
+  aggregateVerify,
+  bip340NormaliseSecret,
+  commVerify,
+  signTransitionWithFixtureNonce,
+  verify,
+} from '../../src/v1/index.js';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
+import { schnorr } from '@noble/curves/secp256k1.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHIM_BIN = join(HERE, 'shim', 'target', 'release', 'zkcoins-sdk-shim');
@@ -345,6 +355,343 @@ describe('cross-rust: randomized parity (100 samples per op)', () => {
         rust,
         `sample ${i} seed=${PRNG_SEED} index=${index} ash=${ash} ocr=${ocr} xpriv=${keys.xpriv}`,
       ).toEqual(js);
+    }
+  });
+});
+
+// ── V.8 fully-pinned fixture (Spec-anchored, not merely shim-anchored) ───────
+
+const V8_SK_1 = '22f508c0a93b29fa87ca8d9abcec996f01620656cd7a7e4ab5418b2e76beccf4';
+const V8_SK_2 = '86b75c297fd9a0af472d06fbf889f7e4667c9e42b7d7efc8b1ca7e66b95462c0';
+const V8_M_SC_1 = 'bf50cc59a665bcdc2b5f0754dd754a73e37552a6b1b69eb9e42c07ddd1ae73e2';
+const V8_M_SC_2 = '85d06ebe2f0f5173af9ff8bdd2d4d594303a640d7b2f1c8819d5a48abfa4773d';
+const V8_R_1 = 'c41ff1a78f2006e5f5aa800efa84b2d2046d108dfa968909974ec37fcb87f6c4';
+const V8_S_1 = '748ae8e2fded9df9830cbaa8893484e753fdfd141cccc8b35a27ab5a870a83d2';
+const V8_R_2 = 'bd22b77069c75431ee3676bea7324a59e9b6466a62a9a3021f831e6ccf5d3220';
+const V8_S_2 = 'caa0374d3cf77e1874298c98d3d3fe8b416f89d51823d6909c3e1cdbf91d3002';
+const V8_S_AGG = 'cfb0c36a8399589b5580ba41cafaf66b7d707443a202e4113f3635872ca58b78';
+const V8_PK_1 = 'e7f2a98e7b45e9424e3e0cb1d937a1698ebd339c6d8344906db979642cf20474';
+const V8_PK_2 = '21799353e64a65ee4b1f414998c44878c56270cf8a81046cb3636e5ec31a3341';
+const V8_R_PRIME_1 = '5657f2e91dc3a2d248501a37dbe674d2cf8ed1a13c89b7710ca89aad3b9fe050';
+const V8_R_PRIME_2 = '9c18a07c07be5225b688895f73daaffefdd62cbb49e1b854dd47f5aee1484193';
+
+describe('cross-rust: v1 transition / half-agg (Spec V.8 + randomized)', () => {
+  it('transition_sign fixture-nonce matches V.8 for both signers (Spec-anchored)', () => {
+    for (const sample of [
+      {
+        sk: V8_SK_1,
+        mSc: V8_M_SC_1,
+        r: V8_R_1,
+        s: V8_S_1,
+        rPrime: V8_R_PRIME_1,
+        pk: V8_PK_1,
+        ctr: 0,
+      },
+      {
+        sk: V8_SK_2,
+        mSc: V8_M_SC_2,
+        r: V8_R_2,
+        s: V8_S_2,
+        rPrime: V8_R_PRIME_2,
+        pk: V8_PK_2,
+        ctr: 2,
+      },
+    ]) {
+      const js = signTransitionWithFixtureNonce({
+        secretKey: hexToBytes(sample.sk),
+        network: 'testnet',
+        mSc: hexToBytes(sample.mSc),
+      });
+      const rust = callShim({
+        op: 'transition_sign',
+        secret_key_hex: sample.sk,
+        m_sc_hex: sample.mSc,
+        network: 'testnet',
+      }) as {
+        r_prime: string;
+        t: string;
+        r: string;
+        e: string;
+        s: string;
+        signature: string;
+        s2c_nonce: string;
+        pk: string;
+        nonce_counter: number;
+      };
+
+      expect(bytesToHex(js.r), 'JS R vs V.8').toBe(sample.r);
+      expect(bytesToHex(js.s), 'JS s vs V.8').toBe(sample.s);
+      expect(bytesToHex(js.rPrime), "JS R' vs V.8").toBe(sample.rPrime);
+      expect(js.nonceCounter, 'JS ctr vs V.8').toBe(sample.ctr);
+
+      expect(rust.r, 'Rust R vs V.8').toBe(sample.r);
+      expect(rust.s, 'Rust s vs V.8').toBe(sample.s);
+      expect(rust.r_prime, "Rust R' vs V.8").toBe(sample.rPrime);
+      expect(rust.nonce_counter, 'Rust ctr vs V.8').toBe(sample.ctr);
+      expect(rust.signature).toBe(bytesToHex(js.signature));
+      expect(rust.t).toBe(bytesToHex(js.t));
+      expect(rust.e).toBe(bytesToHex(js.e));
+      expect(rust.pk).toBe(sample.pk);
+    }
+  });
+
+  it('half_agg over V.8 members matches pinned s_agg (Spec-anchored)', () => {
+    const members = [
+      { pk: hexToBytes(V8_PK_1), r: hexToBytes(V8_R_1), s: hexToBytes(V8_S_1) },
+      { pk: hexToBytes(V8_PK_2), r: hexToBytes(V8_R_2), s: hexToBytes(V8_S_2) },
+    ];
+    const js = aggregateSig(members);
+    expect(bytesToHex(js.sAgg)).toBe(V8_S_AGG);
+
+    const rust = callShim({
+      op: 'half_agg',
+      members: members.map((m) => ({
+        pk_hex: bytesToHex(m.pk),
+        r_hex: bytesToHex(m.r),
+        s_hex: bytesToHex(m.s),
+      })),
+    }) as { z: string; coefficients: string[]; s_agg: string };
+
+    expect(rust.s_agg).toBe(V8_S_AGG);
+    expect(rust.z).toBe(bytesToHex(js.z));
+    expect(rust.coefficients).toEqual(js.coefficients.map(bytesToHex));
+  });
+
+  it('transition_verify / comm_verify / aggregate_verify agree on V.8 accept + N-19 reject', () => {
+    const sig1 = V8_R_1 + V8_S_1;
+    expect(
+      callShim({
+        op: 'transition_verify',
+        public_key_hex: V8_PK_1,
+        signature_hex: sig1,
+        network: 'testnet',
+      }),
+    ).toBe(true);
+    expect(
+      verify({
+        publicKey: hexToBytes(V8_PK_1),
+        signature: hexToBytes(sig1),
+        network: 'testnet',
+      }),
+    ).toBe(true);
+
+    // N-19 cross-network
+    expect(
+      callShim({
+        op: 'transition_verify',
+        public_key_hex: V8_PK_1,
+        signature_hex: sig1,
+        network: 'mainnet',
+      }),
+    ).toBe(false);
+    expect(
+      verify({
+        publicKey: hexToBytes(V8_PK_1),
+        signature: hexToBytes(sig1),
+        network: 'mainnet',
+      }),
+    ).toBe(false);
+
+    expect(
+      callShim({
+        op: 'comm_verify',
+        r_hex: V8_R_1,
+        m_sc_hex: V8_M_SC_1,
+        r_prime_hex: V8_R_PRIME_1,
+      }),
+    ).toBe(true);
+    expect(
+      commVerify({
+        r: hexToBytes(V8_R_1),
+        mSc: hexToBytes(V8_M_SC_1),
+        rPrime: hexToBytes(V8_R_PRIME_1),
+      }),
+    ).toBe(true);
+
+    const members = [
+      { pk_hex: V8_PK_1, r_hex: V8_R_1 },
+      { pk_hex: V8_PK_2, r_hex: V8_R_2 },
+    ];
+    expect(
+      callShim({
+        op: 'aggregate_verify',
+        members,
+        s_agg_hex: V8_S_AGG,
+        network: 'testnet',
+      }),
+    ).toBe(true);
+    expect(
+      aggregateVerify({
+        members: [
+          { pk: hexToBytes(V8_PK_1), r: hexToBytes(V8_R_1) },
+          { pk: hexToBytes(V8_PK_2), r: hexToBytes(V8_R_2) },
+        ],
+        sAgg: hexToBytes(V8_S_AGG),
+        network: 'testnet',
+      }),
+    ).toBe(true);
+  });
+
+  it('transition_sign + verify + comm_verify: 100 random (sk, m_sc) pairs (shim-anchored)', () => {
+    const networks = ['mainnet', 'testnet', 'regtest'] as const;
+    for (let i = 0; i < SAMPLES; i++) {
+      // Sample a valid secret key in [1, n) by hashing PRNG output through the
+      // curve order (reject zero).
+      let skHex = randomHex(32);
+      let skBytes = hexToBytes(skHex);
+      // Ensure it's a valid scalar by re-drawing until bip340Normalise accepts.
+      for (let attempt = 0; attempt < 16; attempt++) {
+        try {
+          bip340NormaliseSecret(skBytes);
+          break;
+        } catch {
+          skHex = randomHex(32);
+          skBytes = hexToBytes(skHex);
+        }
+      }
+      const mScHex = randomHex(32);
+      const network = networks[i % 3];
+      if (network === undefined) throw new Error('network');
+
+      const js = signTransitionWithFixtureNonce({
+        secretKey: skBytes,
+        network,
+        mSc: hexToBytes(mScHex),
+      });
+      const rust = callShim({
+        op: 'transition_sign',
+        secret_key_hex: skHex,
+        m_sc_hex: mScHex,
+        network,
+      }) as {
+        r_prime: string;
+        t: string;
+        r: string;
+        e: string;
+        s: string;
+        signature: string;
+        s2c_nonce: string;
+        pk: string;
+        nonce_counter: number;
+      };
+
+      expect(rust.signature, `sign sample ${i} seed=${PRNG_SEED} sk=${skHex} mSc=${mScHex}`).toBe(
+        bytesToHex(js.signature),
+      );
+      expect(rust.r_prime).toBe(bytesToHex(js.rPrime));
+      expect(rust.t).toBe(bytesToHex(js.t));
+      expect(rust.r).toBe(bytesToHex(js.r));
+      expect(rust.e).toBe(bytesToHex(js.e));
+      expect(rust.s).toBe(bytesToHex(js.s));
+      expect(rust.nonce_counter).toBe(js.nonceCounter);
+
+      const jsVerify = verify({
+        publicKey: js.pk,
+        signature: js.signature,
+        network,
+      });
+      const rustVerify = callShim({
+        op: 'transition_verify',
+        public_key_hex: bytesToHex(js.pk),
+        signature_hex: bytesToHex(js.signature),
+        network,
+      });
+      expect(jsVerify, `verify sample ${i}`).toBe(true);
+      expect(rustVerify).toBe(true);
+
+      const jsComm = commVerify({
+        r: js.r,
+        mSc: hexToBytes(mScHex),
+        rPrime: js.rPrime,
+      });
+      const rustComm = callShim({
+        op: 'comm_verify',
+        r_hex: bytesToHex(js.r),
+        m_sc_hex: mScHex,
+        r_prime_hex: bytesToHex(js.rPrime),
+      });
+      expect(jsComm, `comm_verify sample ${i}`).toBe(true);
+      expect(rustComm).toBe(true);
+    }
+  });
+
+  it('half_agg + aggregate_verify: 50 random two-member batches (shim-anchored)', () => {
+    // Fewer samples: each batch signs twice under the fixture nonce.
+    const BATCHES = 50;
+    for (let i = 0; i < BATCHES; i++) {
+      const network = 'regtest' as const;
+      const members = [];
+      for (let j = 0; j < 2; j++) {
+        let skHex = randomHex(32);
+        let skBytes = hexToBytes(skHex);
+        for (let attempt = 0; attempt < 16; attempt++) {
+          try {
+            bip340NormaliseSecret(skBytes);
+            break;
+          } catch {
+            skHex = randomHex(32);
+            skBytes = hexToBytes(skHex);
+          }
+        }
+        // Force a few odd-y keys so normalisation is exercised.
+        if (j === 1) {
+          const raw = BigInt('0x' + skHex);
+          const P = schnorr.Point.BASE.multiply(raw % schnorr.Point.Fn.ORDER || 1n);
+          if (P.y % 2n === 0n) {
+            // Flip to odd-y by using n - sk when the point is even (same pk after norm).
+            // Prefer re-draw until odd.
+            for (let attempt = 0; attempt < 32; attempt++) {
+              skHex = randomHex(32);
+              try {
+                const n = BigInt('0x' + skHex);
+                if (n === 0n || n >= schnorr.Point.Fn.ORDER) continue;
+                const Q = schnorr.Point.BASE.multiply(n);
+                if (Q.y % 2n === 1n) break;
+              } catch {
+                /* redraw */
+              }
+            }
+            skBytes = hexToBytes(skHex);
+          }
+        }
+        const mScHex = randomHex(32);
+        const signed = signTransitionWithFixtureNonce({
+          secretKey: skBytes,
+          network,
+          mSc: hexToBytes(mScHex),
+        });
+        members.push({ pk: signed.pk, r: signed.r, s: signed.s });
+      }
+
+      const jsAgg = aggregateSig(members);
+      const rustAgg = callShim({
+        op: 'half_agg',
+        members: members.map((m) => ({
+          pk_hex: bytesToHex(m.pk),
+          r_hex: bytesToHex(m.r),
+          s_hex: bytesToHex(m.s),
+        })),
+      }) as { z: string; coefficients: string[]; s_agg: string };
+
+      expect(rustAgg.s_agg, `half_agg sample ${i} seed=${PRNG_SEED}`).toBe(bytesToHex(jsAgg.sAgg));
+      expect(rustAgg.z).toBe(bytesToHex(jsAgg.z));
+
+      const jsOk = aggregateVerify({
+        members: members.map((m) => ({ pk: m.pk, r: m.r })),
+        sAgg: jsAgg.sAgg,
+        network,
+      });
+      const rustOk = callShim({
+        op: 'aggregate_verify',
+        members: members.map((m) => ({
+          pk_hex: bytesToHex(m.pk),
+          r_hex: bytesToHex(m.r),
+        })),
+        s_agg_hex: bytesToHex(jsAgg.sAgg),
+        network,
+      });
+      expect(jsOk, `aggregate_verify sample ${i}`).toBe(true);
+      expect(rustOk).toBe(true);
     }
   });
 });

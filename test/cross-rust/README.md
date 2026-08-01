@@ -17,17 +17,19 @@ implementation.
 ## Scope decision (documented — Spec leaves the live surface open)
 
 DoD §6(b) and the V.7 matrix require byte-equal reproduction for every
-row in the matrix that the **SDK actually implements**. Today the
-published SDK surface is the legacy wallet primitives in
-`src/derivation.ts` and `src/signing.ts`:
+row in the matrix that the **SDK actually implements**. The published
+SDK surface covers:
 
-| Op                                              | Spec / V.7 link           | Criterion                     |
-| ----------------------------------------------- | ------------------------- | ----------------------------- |
-| BIP-39 validate / entropy→mnemonic              | V.2 foundation            | byte-equal phrase             |
-| BIP-39 mnemonic → BIP-32 master xpriv + address | V.2 / historical wallet   | byte-equal `address`, `xpriv` |
-| Non-hardened child pubkeys / signing key        | wallet surface            | byte-equal SEC1 / sk          |
-| BIP-340 Schnorr (`no_aux_rand`)                 | V.5/V.8 signing layer     | byte-equal sig                |
-| `createCommitment` (ash‖ocr → SHA-256 → sign)   | historical two-phase send | byte-equal commitment         |
+| Op                                              | Spec / V.7 link                        | Criterion                     | Anchor                       |
+| ----------------------------------------------- | -------------------------------------- | ----------------------------- | ---------------------------- |
+| BIP-39 validate / entropy→mnemonic              | V.2 foundation                         | byte-equal phrase             | shim                         |
+| BIP-39 mnemonic → BIP-32 master xpriv + address | V.2 / historical wallet                | byte-equal `address`, `xpriv` | shim                         |
+| Non-hardened child pubkeys / signing key        | wallet surface                         | byte-equal SEC1 / sk          | shim                         |
+| BIP-340 Schnorr (`no_aux_rand`)                 | V.5/V.8 signing layer (legacy)         | byte-equal sig                | shim                         |
+| `createCommitment` (ash‖ocr → SHA-256 → sign)   | historical two-phase send              | byte-equal commitment         | shim                         |
+| `transition_sign` (V.8 fixture nonce)           | §3.2 + V.8                             | byte-equal R′, t, R, e, s     | **Spec V.8** (+ shim random) |
+| `transition_verify` / `comm_verify`             | §1.7.10 Verify / CommVerify            | bool agree                    | **Spec V.8** (+ shim random) |
+| `half_agg` / `aggregate_verify`                 | §1.7.10 AggregateSig / AggregateVerify | byte-equal z, aⱼ, s_agg       | **Spec V.8** (+ shim random) |
 
 **Not parity-checked — raw 32-byte `account_from_seed`.** The SDK keeps
 `accountFromSeed` private; the public surface only exposes CSPRNG
@@ -40,16 +42,22 @@ omitted rather than claimed. Mnemonic → account still covers the shared
 **Explicitly not in this gate yet** (SDK has no implementation):
 
 - Spec V.2-ext all-hardened + HKDF key hierarchy
-- V.4 Poseidon digests (`E'₂₅₆`, `nk_commit`, `asset_id`, …)
-- V.8 half-aggregation / sign-to-contract full fixture
+- V.4 Poseidon digests (`E'₂₅₆`, `nk_commit`, `asset_id`, …) beyond the
+  already-shipped Poseidon module's own unit vectors
 - V.10 note encryption, V.11 nflog, V.12 NIP-17 wire
 
 Those rows land as additional ops in this suite when the corresponding
 SDK modules land. Expanding the gate without a JS implementation would
 only re-test Rust against itself.
 
-Address hashing in the live surface is **SHA-256(compressed pk₀)** —
-matching the pure-JS SDK and the historical WASM client contract the
+**V.8 half-aggregation / sign-to-contract** is in the gate: the SDK
+implements §3.2 + §1.7.10 under `src/v1/`, and the cross suite pins the
+normative fixture plus randomised fixture-nonce draws against the shim.
+A shim that re-implements the same formula only gives random-coverage
+beyond V.8; **V.8 itself is the Spec anchor**.
+
+Address hashing in the live legacy surface is **SHA-256(compressed pk₀)**
+— matching the pure-JS SDK and the historical WASM client contract the
 SDK was written against. Spec-conformant Poseidon owner
 (`Hc` / `digest_to_bytes`) is part of the V.2-ext/V.4 follow-up, not
 silently substituted here.
