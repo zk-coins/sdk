@@ -581,6 +581,136 @@ describe('TransitionRequest presence matrix (full)', () => {
     });
     expect(normalised).not.toHaveProperty('publisher_pubkey');
   });
+
+  it('receive with publisher_pubkey is normalised (case c)', () => {
+    const out = assertTransitionRequest({
+      kind: 'receive',
+      ...base,
+      publisher_pubkey: 'ee'.repeat(32),
+      fold_coin_ids: ['11'.repeat(32)],
+    });
+    expect(out).toEqual({
+      kind: 'receive',
+      subject: base.subject,
+      next_pubkey: base.next_pubkey,
+      npk_rand: base.npk_rand,
+      publisher_pubkey: 'ee'.repeat(32),
+      fold_coin_ids: ['11'.repeat(32)],
+    });
+    const json = transitionRequestToJson(out);
+    expect(json.publisher_pubkey).toBe('ee'.repeat(32));
+    expect(json.fold_coin_ids).toEqual(['11'.repeat(32)]);
+  });
+
+  it('rejects non-array coin id lists', () => {
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: 'cc'.repeat(32),
+        output_templates: oneOut,
+      }),
+    ).toThrow(/input_coins must be an array/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'receive',
+        ...base,
+        fold_coin_ids: { id: 'ee'.repeat(32) },
+      }),
+    ).toThrow(/fold_coin_ids must be an array/);
+  });
+
+  it('rejects malformed output_templates entries (object/fields)', () => {
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [null],
+      }),
+    ).toThrow(/output_templates\[0\] must be an object/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [['not', 'object']],
+      }),
+    ).toThrow(/output_templates\[0\] must be an object/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [{ asset_id: 'dd'.repeat(32), amount: '1' }],
+      }),
+    ).toThrow(/output_templates\[0\]\.recipient is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [{ recipient: base.subject, amount: '1' }],
+      }),
+    ).toThrow(/output_templates\[0\]\.asset_id is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [{ recipient: base.subject, asset_id: 'dd'.repeat(32) }],
+      }),
+    ).toThrow(/output_templates\[0\]\.amount is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: [{ recipient: '', asset_id: 'dd'.repeat(32), amount: '1' }],
+      }),
+    ).toThrow(/output_templates\[0\]\.recipient is required/);
+  });
+
+  it('rejects issuance missing amount and v2 missing terms_salt after cap_total', () => {
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: { name: 'x', decimals: 0, issuance_version: 1 },
+      }),
+    ).toThrow(/issuance\.amount is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 2,
+          amount: '1',
+          cap_total: '100',
+        },
+      }),
+    ).toThrow(/issuance_version=2 requires cap_total and terms_salt/);
+    // Empty terms_salt after a present cap_total hits the second gate.
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 2,
+          amount: '1',
+          cap_total: '100',
+          terms_salt: '',
+        },
+      }),
+    ).toThrow(/issuance_version=2 requires cap_total and terms_salt/);
+  });
 });
 
 // ---------------------------------------------------------------------------

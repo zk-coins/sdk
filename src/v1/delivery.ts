@@ -284,6 +284,8 @@ export function invoiceMessage(parts: InvoiceMessageParts): Uint8Array {
   }
 
   const memoBytes = new TextEncoder().encode(parts.memo ?? '');
+  // unreachable: a >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder
+  /* v8 ignore next 3 */
   if (memoBytes.length > 0xffff_ffff) {
     throw new DeliveryCredentialError('memo', 'invoiceMessage: memo length exceeds u32');
   }
@@ -292,6 +294,8 @@ export function invoiceMessage(parts: InvoiceMessageParts): Uint8Array {
   let relayBytesLen = 0;
   for (const r of parts.relays) {
     const b = new TextEncoder().encode(r);
+    // unreachable: a >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder
+    /* v8 ignore next 3 */
     if (b.length > 0xffff_ffff) {
       throw new DeliveryCredentialError('relays', 'invoiceMessage: relay URL length exceeds u32');
     }
@@ -909,12 +913,16 @@ export function assertOutputDeliveries(
 // Internals
 // ---------------------------------------------------------------------------
 
+/**
+ * BIP-340 verify under an x-only pubkey.
+ *
+ * `@noble/curves` `schnorr.verify` already fail-closes malformed points/sigs
+ * (invalid field element, off-curve, bad lengths) by returning `false` —
+ * it does not throw for those cases (see noble's `schnorrVerify` try/catch).
+ * Callers must therefore treat `false` as the sole rejection signal.
+ */
 function verifyBip340(pubkey: Uint8Array, msg: Uint8Array, sig: Uint8Array): boolean {
-  try {
-    return schnorr.verify(sig, msg, pubkey);
-  } catch {
-    return false;
-  }
+  return schnorr.verify(sig, msg, pubkey);
 }
 
 function validateRelayUrl(url: string): void {
@@ -937,12 +945,8 @@ export function parseU128Decimal(s: string, field: string): bigint {
       `${field}: non-canonical decimal string (expected 0|[1-9][0-9]*)`,
     );
   }
-  let n: bigint;
-  try {
-    n = BigInt(s);
-  } catch {
-    throw new DeliveryCredentialError(field, `${field}: not a valid integer`);
-  }
+  // Every regex-matching input is a legal BigInt decimal; the regex is the guard.
+  const n = BigInt(s);
   if (n < 0n || n >= 1n << 128n) {
     throw new DeliveryCredentialError(field, `${field}: out of u128 range`);
   }

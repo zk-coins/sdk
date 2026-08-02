@@ -191,12 +191,9 @@ export function verifyNip01Event(event: NostrEventJson): void {
   }
 
   // BIP-340 over the 32-byte event id under the author x-only key.
-  let ok: boolean;
-  try {
-    ok = schnorr.verify(sig, claimedId, pubkey);
-  } catch {
-    throw new Error('verifyNip01Event: BIP-340 verification failed (malformed key or signature)');
-  }
+  // `@noble/curves` `schnorr.verify` fail-closes malformed points/sigs by
+  // returning `false` (it does not throw for off-curve / x ≥ p inputs).
+  const ok = schnorr.verify(sig, claimedId, pubkey);
   if (!ok) {
     throw new Error('verifyNip01Event: BIP-340 signature verification failed');
   }

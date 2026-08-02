@@ -785,3 +785,598 @@ describe('NIP-01 event id and V.2-ext key pins', () => {
     expect(encodeHexLower(pkBytes)).toBe(PK0_HEX);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Delivery rejection / edge paths (coverage for fail-closed branches)
+// ---------------------------------------------------------------------------
+
+describe('PaymentIdentityPinStore edge paths', () => {
+  it('delete removes a pin and returns false when absent', () => {
+    const store = new PaymentIdentityPinStore();
+    expect(store.delete(OP_PUBKEY_HEX)).toBe(false);
+    store.set(OP_PUBKEY_HEX, {
+      address: V2_BECH32,
+      pk0: V2_PK0_SAMPLE,
+      nk_commit: V2_NK_COMMIT_SAMPLE,
+      ivpk: IVPK_HEX,
+    });
+    expect(store.delete(OP_PUBKEY_HEX)).toBe(true);
+    expect(store.get(OP_PUBKEY_HEX)).toBeUndefined();
+  });
+
+  it('rejects empty op_pubkey for pin lookup', () => {
+    const store = new PaymentIdentityPinStore();
+    expect(() => store.get('')).toThrow(DeliveryCredentialError);
+    expect(() => store.get('')).toThrow(/op_pubkey is required/);
+    expect(() =>
+      store.set('', {
+        address: V2_BECH32,
+        pk0: PK0_HEX,
+        nk_commit: V2_NK_COMMIT_SAMPLE,
+        ivpk: IVPK_HEX,
+      }),
+    ).toThrow(/op_pubkey is required/);
+  });
+
+  it('pin check treats undecodable address or bad hex fields as mismatch', () => {
+    const store = new PaymentIdentityPinStore();
+    const { invoice, recipient } = buildValidInvoice();
+    // Empty address → decodeAddressField throws → pinsEqual catch → mismatch.
+    store.set(OP_PUBKEY_HEX, {
+      address: '',
+      pk0: invoice.pk0,
+      nk_commit: invoice.nk_commit,
+      ivpk: invoice.ivpk,
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest', pinStore: store },
+      ),
+    ).toThrow(PaymentIdentityPinMismatchError);
+
+    // Garbage non-Bech32 address that fails hex decode → first catch.
+    store.set(OP_PUBKEY_HEX, {
+      address: 'not-zk1-and-not-hex',
+      pk0: invoice.pk0,
+      nk_commit: invoice.nk_commit,
+      ivpk: invoice.ivpk,
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest', pinStore: store },
+      ),
+    ).toThrow(PaymentIdentityPinMismatchError);
+
+    // Hex address form is accepted; bad pk0 hex on the pin → second catch → mismatch.
+    store.set(OP_PUBKEY_HEX, {
+      address: encodeHexLower(addressFromParts(hex32(invoice.pk0), hex32(invoice.nk_commit))),
+      pk0: 'zz'.repeat(32),
+      nk_commit: invoice.nk_commit,
+      ivpk: invoice.ivpk,
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest', pinStore: store },
+      ),
+    ).toThrow(PaymentIdentityPinMismatchError);
+  });
+
+  it('matching pin accepts raw 32-byte hex address spelling', () => {
+    const store = new PaymentIdentityPinStore();
+    const { invoice, recipient } = buildValidInvoice();
+    const rawAddr = encodeHexLower(addressFromParts(hex32(invoice.pk0), hex32(invoice.nk_commit)));
+    store.set(OP_PUBKEY_HEX, {
+      address: rawAddr,
+      pk0: invoice.pk0,
+      nk_commit: invoice.nk_commit,
+      ivpk: invoice.ivpk,
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest', pinStore: store },
+      ),
+    ).not.toThrow();
+  });
+});
+
+describe('addressFromParts / invoiceMessage bounds', () => {
+  it('rejects non-32-byte pk0 and nk_commit', () => {
+    expect(() => addressFromParts(new Uint8Array(16), new Uint8Array(32))).toThrow(
+      /pk0 must be 32 bytes, got 16/,
+    );
+    expect(() => addressFromParts(new Uint8Array(32), new Uint8Array(31))).toThrow(
+      /nk_commit must be 32 bytes, got 31/,
+    );
+  });
+
+  it('rejects amount outside u128 and oversized relay count', () => {
+    const z = new Uint8Array(32);
+    const base = {
+      recipient: z,
+      pk0: z,
+      nkCommit: z,
+      assetId: z,
+      ivpk: z,
+      opPubkey: z,
+      relays: [RELAY] as string[],
+    };
+    expect(() => invoiceMessage({ ...base, amount: -1n })).toThrow(/amount out of u128 range/);
+    expect(() => invoiceMessage({ ...base, amount: 1n << 128n })).toThrow(
+      /amount out of u128 range/,
+    );
+    expect(() =>
+      invoiceMessage({
+        ...base,
+        amount: 1n,
+        relays: Array.from({ length: 0x10000 }, () => 'wss://r.example'),
+      }),
+    ).toThrow(/relay count exceeds u16/);
+  });
+
+  it('rejects non-32-byte fields via require32', () => {
+    const z = new Uint8Array(32);
+    expect(() =>
+      invoiceMessage({
+        amount: 1n,
+        recipient: new Uint8Array(16),
+        pk0: z,
+        nkCommit: z,
+        assetId: z,
+        ivpk: z,
+        opPubkey: z,
+        relays: [],
+      }),
+    ).toThrow(/recipient must be 32 bytes/);
+  });
+});
+
+describe('parseDeliveryCredential shape rejections', () => {
+  it('rejects non-object delivery, invoice, and event', () => {
+    expect(() => parseDeliveryCredential(null)).toThrow(/delivery must be an object/);
+    expect(() => parseDeliveryCredential('invoice')).toThrow(/delivery must be an object/);
+    expect(() => parseDeliveryCredential({ type: 'invoice', invoice: null })).toThrow(
+      /invoice must be an object/,
+    );
+    expect(() => parseDeliveryCredential({ type: 'invoice', invoice: [] })).toThrow(
+      /invoice must be an object/,
+    );
+    expect(() => parseDeliveryCredential({ type: 'profile', event: null })).toThrow(
+      /event must be an object/,
+    );
+  });
+
+  it('rejects non-string relays and non-string memo', () => {
+    const { invoice } = buildValidInvoice();
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'invoice',
+        invoice: { ...invoice, relays: 'wss://x' },
+      }),
+    ).toThrow(/relays must be an array of strings/);
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'invoice',
+        invoice: { ...invoice, relays: [1, 2] },
+      }),
+    ).toThrow(/relays must be an array of strings/);
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'invoice',
+        invoice: { ...invoice, memo: 42 },
+      }),
+    ).toThrow(/memo must be a string when present/);
+  });
+
+  it('accepts string memo and copies it onto the invoice', () => {
+    const { invoice } = buildValidInvoice({ memo: 'hello' });
+    const parsed = parseDeliveryCredential({ type: 'invoice', invoice });
+    expect(parsed.type).toBe('invoice');
+    if (parsed.type === 'invoice') {
+      expect(parsed.invoice.memo).toBe('hello');
+    }
+  });
+
+  it('rejects event.tags shape and non-integer created_at/kind', () => {
+    const { event } = buildValidProfile({ network: 'regtest' });
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'profile',
+        event: { ...event, created_at: -1 },
+      }),
+    ).toThrow(/created_at must be a non-negative integer/);
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'profile',
+        event: { ...event, kind: 1.5 },
+      }),
+    ).toThrow(/kind must be a non-negative integer/);
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'profile',
+        event: { ...event, tags: 'nope' },
+      }),
+    ).toThrow(/event\.tags must be an array/);
+    expect(() =>
+      parseDeliveryCredential({
+        type: 'profile',
+        event: { ...event, tags: [['ok'], [1, 2]] },
+      }),
+    ).toThrow(/each event tag must be an array of strings/);
+    // Happy path with a real tag array so the copy arm runs.
+    const withTags = parseDeliveryCredential({
+      type: 'profile',
+      event: { ...event, tags: [['p', 'aa'.repeat(32)]] },
+    });
+    expect(withTags.type).toBe('profile');
+    if (withTags.type === 'profile') {
+      expect(withTags.event.tags).toEqual([['p', 'aa'.repeat(32)]]);
+      // Defensive copy: mutating the input must not alter the parsed value.
+      (event as { tags: string[][] }).tags = [];
+      expect(withTags.event.tags).toEqual([['p', 'aa'.repeat(32)]]);
+    }
+  });
+});
+
+describe('verifyDeliveryCredential remaining refusals', () => {
+  it('rejects empty invoice.relays and non-ws relay URLs', () => {
+    const { invoice, recipient } = buildValidInvoice({ relays: [] });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/relays must be non-empty/);
+
+    const badUrl = buildValidInvoice({ relays: ['https://not-a-relay.example'] });
+    // Signatures were built over the bad relay list; validation fails on URL form first.
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice: badUrl.invoice },
+        { recipient: badUrl.recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/relay URL must start with ws:\/\/ or wss:\/\//);
+  });
+
+  it('rejects profile kind ≠ 0, non-JSON content, non-object content, missing zkcoins', () => {
+    const { event, address } = buildValidProfile({ network: 'regtest' });
+
+    const wrongKind = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 1,
+      tags: [],
+      content: event.content,
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: wrongKind },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/kind must be 0/);
+
+    const notJson = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: 'not-json{',
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: notJson },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/content is not JSON/);
+
+    const notObj = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: '["array"]',
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: notObj },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/content must be a JSON object/);
+
+    const noZk = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify({ name: 'Alice' }),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: noZk },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/zkcoins object is required/);
+  });
+
+  it('rejects zkcoins.op_pubkey duplicate and unknown zkcoins fields', () => {
+    const { event, address } = buildValidProfile({ network: 'regtest' });
+    const content = JSON.parse(event.content) as { zkcoins: Record<string, unknown> };
+
+    content.zkcoins.op_pubkey = OP_PUBKEY_HEX;
+    const withOp = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(content),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: withOp },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/must not duplicate op_pubkey/);
+
+    delete content.zkcoins.op_pubkey;
+    content.zkcoins.extra_field = true;
+    const withExtra = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(content),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: withExtra },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/unknown field/);
+  });
+
+  it('rejects non-string relays entries, address preimage mismatch, and bad addr_sig', () => {
+    const { event, address } = buildValidProfile({ network: 'regtest' });
+    const content = JSON.parse(event.content) as { zkcoins: Record<string, unknown> };
+
+    content.zkcoins.relays = [1, 2];
+    const badRelayTypes = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(content),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: badRelayTypes },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/relays entries must be strings/);
+
+    // Restore valid relays; break address preimage by swapping address to V.2 pin.
+    content.zkcoins.relays = [RELAY];
+    content.zkcoins.address = V2_BECH32;
+    const badAddr = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(content),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: badAddr },
+        { recipient: V2_BECH32, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/H\(pk0 ‖ nk_commit\) != address/);
+
+    // Valid address preimage, forged addr_sig.
+    const good = buildValidProfile({ network: 'regtest' });
+    const goodContent = JSON.parse(good.event.content) as { zkcoins: Record<string, unknown> };
+    goodContent.zkcoins.addr_sig = '00'.repeat(64);
+    const forgedSig = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: good.event.created_at,
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(goodContent),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: forgedSig },
+        { recipient: good.address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/addr_sig invalid under pk0/);
+  });
+
+  it('exhaustiveness arm rejects a runtime-only unknown delivery variant', () => {
+    // parseDeliveryCredential never returns this shape; cast forces the never branch.
+    const bogus = { type: 'carrier-pigeon' } as unknown as DeliveryCredential;
+    expect(() =>
+      verifyDeliveryCredential(
+        bogus,
+        { recipient: V2_BECH32, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/unreachable delivery variant/);
+  });
+});
+
+describe('assertOutputDeliveries address and verify error paths', () => {
+  it('rejects invalid subject and invalid recipient addresses', () => {
+    expect(() => assertOutputDeliveries('not-an-address', [], { network: 'regtest' })).toThrow(
+      /invalid subject address/,
+    );
+
+    expect(() =>
+      assertOutputDeliveries(
+        SELF_SUBJECT,
+        [{ recipient: 'also-not-an-address', asset_id: ASSET_ID, amount: '1' }],
+        { network: 'regtest' },
+      ),
+    ).toThrow(/recipient invalid/);
+  });
+
+  it('propagates DeliveryCredentialError from nested verify', () => {
+    const { invoice, recipient } = buildValidInvoice({ addr_sig: '00'.repeat(64) });
+    expect(() =>
+      assertOutputDeliveries(
+        SELF_SUBJECT,
+        [
+          {
+            recipient,
+            asset_id: ASSET_ID,
+            amount: AMOUNT,
+            delivery: { type: 'invoice', invoice },
+          },
+        ],
+        { network: 'regtest' },
+      ),
+    ).toThrow(/addr_sig|check \(ii\)/);
+  });
+
+  it('rewraps plain Error from nested hex decode as DeliveryCredentialError', () => {
+    // parseDeliveryCredential only checks string shapes; wrong-length pk0 is a
+    // plain Error from decodeHexExact inside verify — assertOutputDeliveries
+    // must re-emit it under code "verify".
+    const { invoice, recipient } = buildValidInvoice();
+    invoice.pk0 = 'aa'.repeat(16); // 16 bytes, not 32
+    try {
+      assertOutputDeliveries(
+        SELF_SUBJECT,
+        [
+          {
+            recipient,
+            asset_id: ASSET_ID,
+            amount: AMOUNT,
+            delivery: { type: 'invoice', invoice },
+          },
+        ],
+        { network: 'regtest' },
+      );
+      expect.unreachable('expected DeliveryCredentialError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(DeliveryCredentialError);
+      if (!(err instanceof DeliveryCredentialError)) throw err;
+      expect(err.code).toBe('verify');
+      expect(err.message).toMatch(/output_templates\[0\]\.delivery:/);
+    }
+  });
+});
+
+describe('verifyBip340 malformed-key path via invoice', () => {
+  /**
+   * 32-byte x-only with x ≥ field prime p (all 0xFF). Length is valid; the
+   * point is not. `@noble/curves` `schnorr.verify` returns false for this
+   * (it does not throw) — `verifyBip340` therefore rejects via `false`.
+   */
+  const X_GE_P = 'ff'.repeat(32);
+
+  it('rejects addr_sig check when pk0 is off-curve (verify returns false)', () => {
+    // BIP-340 invalid x-only key (same probe as half-agg tests). Address is
+    // still H(pk0‖nk) so check (i) passes; BIP-340 under pk0 is the gate.
+    const OFF_CURVE = 'eefdea4cdb677750a420fee807eacf21eb9898ae79b9768766e4faa04a2d4a34';
+    const nk = v2extNkCommit();
+    const recipientRaw = addressFromParts(hex32(OFF_CURVE), nk);
+    const recipient = encodeZkAddress(recipientRaw);
+    const msg = invoiceMessage({
+      amount: BigInt(AMOUNT),
+      recipient: recipientRaw,
+      pk0: hex32(OFF_CURVE),
+      nkCommit: nk,
+      assetId: hex32(ASSET_ID),
+      ivpk: hex32(IVPK_HEX),
+      opPubkey: hex32(OP_PUBKEY_HEX),
+      relays: [RELAY],
+    });
+    const invoice: InvoiceJson = {
+      amount: AMOUNT,
+      recipient,
+      asset_id: ASSET_ID,
+      pk0: OFF_CURVE,
+      nk_commit: encodeHexLower(nk),
+      ivpk: IVPK_HEX,
+      op_pubkey: OP_PUBKEY_HEX,
+      relays: [RELAY],
+      addr_sig: signMsg(hex32(SK0_HEX), msg),
+      sig: signMsg(hex32(OP_SECRET_HEX), msg),
+    };
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/addr_sig|check \(ii\)/);
+  });
+
+  it('rejects addr_sig check when pk0 x ≥ p (32×0xFF, verify returns false)', () => {
+    const nk = v2extNkCommit();
+    const pk0 = hex32(X_GE_P);
+    const recipientRaw = addressFromParts(pk0, nk);
+    const recipient = encodeZkAddress(recipientRaw);
+    const msg = invoiceMessage({
+      amount: BigInt(AMOUNT),
+      recipient: recipientRaw,
+      pk0,
+      nkCommit: nk,
+      assetId: hex32(ASSET_ID),
+      ivpk: hex32(IVPK_HEX),
+      opPubkey: hex32(OP_PUBKEY_HEX),
+      relays: [RELAY],
+    });
+    const invoice: InvoiceJson = {
+      amount: AMOUNT,
+      recipient,
+      asset_id: ASSET_ID,
+      pk0: X_GE_P,
+      nk_commit: encodeHexLower(nk),
+      ivpk: IVPK_HEX,
+      op_pubkey: OP_PUBKEY_HEX,
+      relays: [RELAY],
+      addr_sig: signMsg(hex32(SK0_HEX), msg),
+      sig: signMsg(hex32(OP_SECRET_HEX), msg),
+    };
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        { recipient, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/addr_sig|check \(ii\)/);
+  });
+});
+
+describe('parseU128Decimal bounds', () => {
+  it('rejects non-canonical decimals via the regex guard (before BigInt)', () => {
+    expect(() => parseU128Decimal('01', 'field')).toThrow(/non-canonical decimal string/);
+    expect(() => parseU128Decimal('-1', 'field')).toThrow(/non-canonical decimal string/);
+    expect(() => parseU128Decimal('1.0', 'field')).toThrow(/non-canonical decimal string/);
+    expect(() => parseU128Decimal('1e2', 'field')).toThrow(/non-canonical decimal string/);
+    expect(() => parseU128Decimal(' ', 'field')).toThrow(/non-canonical decimal string/);
+  });
+
+  it('rejects values outside u128 after successful BigInt parse', () => {
+    // Canonical decimal longer than u128 max (2^128 − 1 ≈ 39 digits).
+    const over = '1' + '0'.repeat(40);
+    expect(() => parseU128Decimal(over, 'field')).toThrow(/out of u128 range/);
+  });
+});
