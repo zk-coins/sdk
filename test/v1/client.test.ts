@@ -77,6 +77,13 @@ function abortReasonAsError(signal: AbortSignal): Error {
 const V8_SK1 = hexToBytes('22f508c0a93b29fa87ca8d9abcec996f01620656cd7a7e4ab5418b2e76beccf4');
 const V8_PK1 = hexToBytes('e7f2a98e7b45e9424e3e0cb1d937a1698ebd339c6d8344906db979642cf20474');
 
+/**
+ * Valid Bech32m zk-address for request fixtures that need a real checksum
+ * (assertOutputDeliveries decodes subject/recipient before any other check).
+ * Payload is the all-zero 32-byte address — encoded, never hand-invented.
+ */
+const FIXTURE_ZK_ADDRESS = encodeZkAddress(new Uint8Array(32));
+
 const V8_PD: ProofData = {
   newAccountStateHash: hexToBytes(
     'f882df3ef57d11032e01c2214525060766250b110b09586cd6cecbed8e3ed4f7',
@@ -140,7 +147,7 @@ describe('v1 SPEND derivation (V.2-ext)', () => {
 
 describe('TransitionRequest presence matrix', () => {
   const base = {
-    subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+    subject: FIXTURE_ZK_ADDRESS,
     next_pubkey: 'aa'.repeat(32),
     npk_rand: 'bb'.repeat(32),
   };
@@ -462,13 +469,13 @@ describe('v1 transition flow (msw)', () => {
     const client = newClient('testnet');
     const accepted = await client.submitTransition({
       kind: 'send',
-      subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+      subject: FIXTURE_ZK_ADDRESS,
       next_pubkey: encodeHexLower(nextPubkey),
       npk_rand: encodeHexLower(npkRand),
       input_coins: ['ab'.repeat(32)],
       output_templates: [
         {
-          recipient: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+          recipient: FIXTURE_ZK_ADDRESS,
           asset_id: 'cd'.repeat(32),
           amount: '10',
         },
@@ -874,7 +881,7 @@ describe('ZkCoinsV1Client request surface', () => {
     await newClient().submitTransition(
       {
         kind: 'receive',
-        subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+        subject: FIXTURE_ZK_ADDRESS,
         next_pubkey: 'aa'.repeat(32),
         npk_rand: 'bb'.repeat(32),
         fold_coin_ids: ['cc'.repeat(32)],
@@ -1249,7 +1256,7 @@ describe('ZkCoinsV1Client request surface', () => {
     await expect(
       newClient().submitTransition({
         kind: 'receive',
-        subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+        subject: FIXTURE_ZK_ADDRESS,
         next_pubkey: 'aa'.repeat(32),
         npk_rand: 'bb'.repeat(32),
         fold_coin_ids: ['cc'.repeat(32)],
@@ -1277,7 +1284,7 @@ describe('ZkCoinsV1Client request surface', () => {
     await expect(
       newClient().submitTransition({
         kind: 'receive',
-        subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+        subject: FIXTURE_ZK_ADDRESS,
         next_pubkey: 'aa'.repeat(32),
         npk_rand: 'bb'.repeat(32),
         fold_coin_ids: ['cc'.repeat(32)],
@@ -1849,7 +1856,7 @@ async function expectExactError(run: () => Promise<unknown>, message: string): P
 
 const RECEIVE_TX: TransitionRequest = {
   kind: 'receive',
-  subject: 'zk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq6gtw5c',
+  subject: FIXTURE_ZK_ADDRESS,
   next_pubkey: 'aa'.repeat(32),
   npk_rand: 'bb'.repeat(32),
   fold_coin_ids: ['cc'.repeat(32)],

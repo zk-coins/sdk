@@ -19,6 +19,11 @@
  */
 
 import { REQUEST_TIMEOUT_MS } from '../config.js';
+import {
+  assertOutputDeliveries,
+  PaymentIdentityPinStore,
+  type VerifyDeliveryOptions,
+} from './delivery.js';
 import { redactBearerToken, V1ApiError } from './errors.js';
 import { expectPresent } from './expectPresent.js';
 import type { Network } from './mstate.js';
@@ -171,6 +176,12 @@ export interface ZkCoinsV1ClientOptions {
    * against `GET /v1/info` when that is also known.
    */
   network: Network;
+  /**
+   * §4.3 payment-identity pin set. When omitted the client owns a fresh
+   * empty store (first contact is not an error; pin mismatches still
+   * refuse silent payment once pins are recorded).
+   */
+  pinStore?: PaymentIdentityPinStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +191,11 @@ export interface ZkCoinsV1ClientOptions {
 export class ZkCoinsV1Client {
   public readonly apiUrl: string;
   public readonly network: Network;
+  /**
+   * §4.3 payment-identity pin store. Checked when a delivery credential is
+   * accepted on `submitTransition` (and by {@link placeDeliveryCredential}).
+   */
+  public readonly pinStore: PaymentIdentityPinStore;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly requestTimeoutMs: number;
   /** Canonical host authority for `chan_bind` (derived from apiUrl). */
@@ -201,6 +217,7 @@ export class ZkCoinsV1Client {
     }
     this.apiUrl = opts.apiUrl.replace(/\/+$/, '');
     this.network = opts.network;
+    this.pinStore = opts.pinStore ?? new PaymentIdentityPinStore();
     this.host = canonicalHostFromApiUrl(this.apiUrl);
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
     this.requestTimeoutMs =
@@ -220,11 +237,30 @@ export class ZkCoinsV1Client {
   /**
    * `POST /v1/tx` → 202 `{ job_id, status: "accepted" }`.
    * Beleg: api/src/jobs.rs `post_tx` L81–104; body `TransitionRequestJson` L31–48.
+   *
+   * Before the request leaves the wallet: for every output that carries a
+   * `delivery` credential (and for every non-self output, which requires one)
+   * the §4.3 / §7.5 sender checks run, including the payment-identity pin
+   * comparison against {@link pinStore}. Pin mismatch refuses silent payment
+   * unless `confirmPinMismatch` is set.
    */
   async submitTransition(
     body: TransitionRequest,
-    opts: { idempotencyKey?: string; signal?: AbortSignal } = {},
+    opts: {
+      idempotencyKey?: string;
+      signal?: AbortSignal;
+      /** Explicit user confirmation after a §4.3 pin-mismatch warning. */
+      confirmPinMismatch?: boolean;
+      /** Record a pin on first successful credential verification. */
+      pinOnFirstUse?: boolean;
+    } = {},
   ): Promise<V1JobAccepted> {
+    this.assertDeliveriesForSubmit(body, {
+      ...(opts.confirmPinMismatch !== undefined
+        ? { confirmPinMismatch: opts.confirmPinMismatch }
+        : {}),
+      ...(opts.pinOnFirstUse !== undefined ? { pinOnFirstUse: opts.pinOnFirstUse } : {}),
+    });
     const json = transitionRequestToJson(body);
     const headers: Record<string, string> = {};
     if (opts.idempotencyKey !== undefined) {
@@ -237,6 +273,28 @@ export class ZkCoinsV1Client {
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
     return parseJobAccepted(data);
+  }
+
+  /**
+   * Sender-side delivery presence + §4.3 checks for send/mint outputs.
+   * Receive has no `output_templates` and is a no-op.
+   */
+  private assertDeliveriesForSubmit(
+    body: TransitionRequest,
+    pinOpts: { confirmPinMismatch?: boolean; pinOnFirstUse?: boolean },
+  ): void {
+    if (body.kind !== 'send' && body.kind !== 'mint') {
+      return;
+    }
+    const verifyOpts: VerifyDeliveryOptions = {
+      network: this.network,
+      pinStore: this.pinStore,
+      ...(pinOpts.confirmPinMismatch !== undefined
+        ? { confirmPinMismatch: pinOpts.confirmPinMismatch }
+        : {}),
+      ...(pinOpts.pinOnFirstUse !== undefined ? { pinOnFirstUse: pinOpts.pinOnFirstUse } : {}),
+    };
+    assertOutputDeliveries(body.subject, body.output_templates, verifyOpts);
   }
 
   /**

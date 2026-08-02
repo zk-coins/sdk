@@ -11,12 +11,25 @@
  *
  * Runtime checks still enforce non-empty lists and reject a sneaked
  * `fee_address` for plain-JS callers that bypass the type checker.
+ *
+ * `OutputTemplate.delivery` is the closed tagged union from §7.5; unknown
+ * `type` values are rejected at parse time (never passed through).
  */
+
+import { parseDeliveryCredential, type DeliveryCredential } from './delivery.js';
+
+export type { DeliveryCredential } from './delivery.js';
 
 export interface OutputTemplate {
   recipient: string;
   asset_id: string;
   amount: string;
+  /**
+   * Delivery credential for this output slot (position binding is
+   * normative: `output_templates[i].delivery` authorises only this slot).
+   * Required for every non-self output; optional on self-outputs.
+   */
+  delivery?: DeliveryCredential;
 }
 
 export type IssuanceV1 = {
@@ -92,6 +105,11 @@ function field(obj: object, key: string): unknown {
   return Reflect.get(obj, key);
 }
 
+/**
+ * Shape-level presence matrix. Does **not** run §4.3 crypto — that is
+ * {@link assertTransitionRequestDeliveries} / the client's submit path,
+ * which needs network + optional pin store.
+ */
 export function assertTransitionRequest(body: unknown): asserts body is TransitionRequest {
   if (typeof body !== 'object' || body === null) {
     throw new Error('TransitionRequest: expected object');
@@ -128,6 +146,7 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
       if (!Array.isArray(outputs) || outputs.length === 0) {
         throw new Error('TransitionRequest: kind=send requires non-empty output_templates');
       }
+      assertOutputTemplateShapes(outputs, 'send');
       if (field(body, 'fold_coin_ids') !== undefined) {
         throw new Error('TransitionRequest: kind=send must not carry fold_coin_ids');
       }
@@ -141,6 +160,7 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
       if (!Array.isArray(outputs) || outputs.length === 0) {
         throw new Error('TransitionRequest: kind=mint requires non-empty output_templates');
       }
+      assertOutputTemplateShapes(outputs, 'mint');
       const issuance = field(body, 'issuance');
       if (issuance === undefined || issuance === null) {
         throw new Error('TransitionRequest: kind=mint requires issuance');
@@ -195,6 +215,44 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
 }
 
 /**
+ * Validate each output template's required fields and, when present, the
+ * closed `delivery` union (unknown `type` is an error). Crypto is not run
+ * here.
+ */
+function assertOutputTemplateShapes(outputs: unknown[], kind: string): void {
+  for (let i = 0; i < outputs.length; i++) {
+    const out = outputs[i];
+    if (typeof out !== 'object' || out === null || Array.isArray(out)) {
+      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}] must be an object`);
+    }
+    if (
+      typeof field(out, 'recipient') !== 'string' ||
+      (field(out, 'recipient') as string).length === 0
+    ) {
+      throw new Error(
+        `TransitionRequest: kind=${kind} output_templates[${i}].recipient is required`,
+      );
+    }
+    if (
+      typeof field(out, 'asset_id') !== 'string' ||
+      (field(out, 'asset_id') as string).length === 0
+    ) {
+      throw new Error(
+        `TransitionRequest: kind=${kind} output_templates[${i}].asset_id is required`,
+      );
+    }
+    if (typeof field(out, 'amount') !== 'string' || (field(out, 'amount') as string).length === 0) {
+      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}].amount is required`);
+    }
+    const delivery = field(out, 'delivery');
+    if (delivery !== undefined) {
+      // Unknown type / wrong shape → DeliveryCredentialError (loud).
+      parseDeliveryCredential(delivery);
+    }
+  }
+}
+
+/**
  * JSON body for `POST /v1/tx` — only defined fields, no `fee_address`, no
  * undefined-valued keys (so the server never sees `"fee_address": null`).
  */
@@ -212,10 +270,10 @@ export function transitionRequestToJson(body: TransitionRequest): Record<string,
   switch (body.kind) {
     case 'send':
       out.input_coins = body.input_coins;
-      out.output_templates = body.output_templates;
+      out.output_templates = body.output_templates.map(outputTemplateToJson);
       break;
     case 'mint':
-      out.output_templates = body.output_templates;
+      out.output_templates = body.output_templates.map(outputTemplateToJson);
       out.issuance = body.issuance;
       break;
     case 'receive':
@@ -227,4 +285,21 @@ export function transitionRequestToJson(body: TransitionRequest): Record<string,
     }
   }
   return out;
+}
+
+/**
+ * JSON for one output template. Omits `delivery` when absent so the wire
+ * never carries `"delivery": null`. When present, re-parses the closed
+ * union so an unknown `type` cannot slip through.
+ */
+function outputTemplateToJson(t: OutputTemplate): Record<string, unknown> {
+  const o: Record<string, unknown> = {
+    recipient: t.recipient,
+    asset_id: t.asset_id,
+    amount: t.amount,
+  };
+  if (t.delivery !== undefined) {
+    o.delivery = parseDeliveryCredential(t.delivery);
+  }
+  return o;
 }

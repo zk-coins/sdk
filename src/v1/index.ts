@@ -94,7 +94,37 @@ export {
   type TransitionRequestSend,
   type TransitionRequestMint,
   type TransitionRequestReceive,
+  type DeliveryCredential,
 } from './transitionRequest.js';
+
+export {
+  INVOICE_MESSAGE_DOMAIN,
+  addressFromParts,
+  invoiceMessage,
+  profileInvoiceMessage,
+  parseDeliveryCredential,
+  parseU128Decimal,
+  verifyDeliveryCredential,
+  placeDeliveryCredential,
+  assertOutputDeliveries,
+  PaymentIdentityPinStore,
+  DeliveryCredentialError,
+  PaymentIdentityPinMismatchError,
+  type InvoiceJson,
+  type PaymentIdentityPin,
+  type PinCheckResult,
+  type VerifyDeliveryOptions,
+  type InvoiceMessageParts,
+} from './delivery.js';
+
+export {
+  escapeNip01String,
+  serializeNip01IdPreimage,
+  computeNip01EventId,
+  verifyNip01Event,
+  signNip01Event,
+  type NostrEventJson,
+} from './nostrEvent.js';
 
 export {
   refuseOrSignTransition,
