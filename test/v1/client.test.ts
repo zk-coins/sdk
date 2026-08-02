@@ -1412,6 +1412,273 @@ describe('ZkCoinsV1Client request surface', () => {
     await expect(newClient().getJob('no-coins')).rejects.toThrow(/output_coin_ids: expected array/);
   });
 
+  // ---------------------------------------------------------------------------
+  // §7.5 terminal payload fail-closed (poll + SSE share one parser)
+  // Without the parseJob / parseSseJobPayload tighten-up these cases returned
+  // a "successful" V1Job with status completed/failed/cancelled and no
+  // result/error — a half-success the wallet would treat as valid.
+  // ---------------------------------------------------------------------------
+
+  /** Base job envelope shared by terminal fail-closed fixtures. */
+  function terminalJobBase(
+    status: 'completed' | 'failed' | 'cancelled',
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      job_id: `term-${status}`,
+      kind: 'send',
+      status,
+      progress: status === 'completed' ? 1 : 0,
+      ...extra,
+    };
+  }
+
+  async function expectGetJobMessage(jobId: string, message: string): Promise<void> {
+    try {
+      await newClient().getJob(jobId);
+      expect.unreachable(`getJob(${jobId}) should have thrown`);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      if (!(err instanceof Error)) throw err;
+      expect(err.message).toBe(message);
+    }
+  }
+
+  async function expectStreamJobMessage(jobId: string, message: string): Promise<void> {
+    try {
+      for await (const _ of newClient().streamJob(jobId)) {
+        // drain
+      }
+      expect.unreachable(`streamJob(${jobId}) should have thrown`);
+    } catch (err) {
+      expect(err).toBeInstanceOf(Error);
+      if (!(err instanceof Error)) throw err;
+      expect(err.message).toBe(message);
+    }
+  }
+
+  it('completed without result → error, not silent success (poll)', async () => {
+    // Without the fix: parseJob left result undefined and returned status completed.
+    server.use(
+      http.get(`${BASE}/v1/jobs/term-completed`, () =>
+        HttpResponse.json(terminalJobBase('completed')),
+      ),
+    );
+    await expectGetJobMessage('term-completed', 'job status is completed but result is absent');
+  });
+
+  it('failed without error → error (poll)', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/term-failed`, () => HttpResponse.json(terminalJobBase('failed'))),
+    );
+    await expectGetJobMessage('term-failed', 'job status is failed but error is absent');
+  });
+
+  it('cancelled without error → error (poll)', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/term-cancelled`, () =>
+        HttpResponse.json(terminalJobBase('cancelled')),
+      ),
+    );
+    await expectGetJobMessage('term-cancelled', 'job status is cancelled but error is absent');
+  });
+
+  it('same half-successful terminal jobs over SSE yield the same errors as poll', async () => {
+    // Closes the bypass: before the fix, streamJob yielded the raw object and
+    // stopped on terminal status without ever calling parseJob.
+    const cases: Array<{
+      id: string;
+      body: Record<string, unknown>;
+      message: string;
+    }> = [
+      {
+        id: 'sse-no-result',
+        body: terminalJobBase('completed'),
+        message: 'job status is completed but result is absent',
+      },
+      {
+        id: 'sse-no-fail-err',
+        body: { ...terminalJobBase('failed'), job_id: 'sse-no-fail-err' },
+        message: 'job status is failed but error is absent',
+      },
+      {
+        id: 'sse-no-cancel-err',
+        body: { ...terminalJobBase('cancelled'), job_id: 'sse-no-cancel-err' },
+        message: 'job status is cancelled but error is absent',
+      },
+    ];
+
+    for (const c of cases) {
+      // Poll path — pin the expected message.
+      server.use(http.get(`${BASE}/v1/jobs/${c.id}`, () => HttpResponse.json(c.body)));
+      await expectGetJobMessage(c.id, c.message);
+
+      // SSE complete/error frame with the identical JSON body.
+      const eventName = c.body.status === 'completed' ? 'complete' : 'error';
+      const frames = `event: ${eventName}\ndata: ${JSON.stringify(c.body)}\n\n`;
+      server.use(
+        http.get(
+          `${BASE}/v1/jobs/${c.id}/stream`,
+          () =>
+            new HttpResponse(frames, {
+              status: 200,
+              headers: { 'Content-Type': 'text/event-stream' },
+            }),
+        ),
+      );
+      await expectStreamJobMessage(c.id, c.message);
+    }
+  });
+
+  it('well-formed jobs per status are still accepted (poll + SSE)', async () => {
+    const ash = '11'.repeat(32);
+    const ocr = '22'.repeat(32);
+    const inr = '33'.repeat(32);
+    const awaiting: AwaitingSignature = {
+      new_account_state_hash: ash,
+      output_coins_root: ocr,
+      input_nullifiers_root: inr,
+      coin_history_root: '44'.repeat(32),
+      nav_commitment: '55'.repeat(32),
+      npk_commit: '66'.repeat(32),
+      proof_data_hash: '77'.repeat(32),
+      txn_pubkey: '88'.repeat(32),
+      send_counter: 1,
+    };
+
+    const wellFormed: Array<{ id: string; body: Record<string, unknown> }> = [
+      {
+        id: 'ok-proving',
+        body: { job_id: 'ok-proving', kind: 'send', status: 'proving', progress: 0.3 },
+      },
+      {
+        id: 'ok-publishing',
+        body: { job_id: 'ok-publishing', kind: 'send', status: 'publishing', progress: 0.9 },
+      },
+      {
+        id: 'ok-await',
+        body: {
+          job_id: 'ok-await',
+          kind: 'send',
+          status: 'awaiting_signature',
+          progress: 0.5,
+          awaiting_signature: awaiting,
+        },
+      },
+      {
+        id: 'ok-completed',
+        body: {
+          job_id: 'ok-completed',
+          kind: 'send',
+          status: 'completed',
+          progress: 1,
+          result: {
+            new_account_state_hash: ash,
+            output_coins_root: ocr,
+            input_nullifiers_root: inr,
+            output_coin_ids: ['aa'.repeat(32)],
+            publisher_pubkey: 'bb'.repeat(32),
+          },
+        },
+      },
+      {
+        id: 'ok-failed',
+        body: {
+          job_id: 'ok-failed',
+          kind: 'send',
+          status: 'failed',
+          progress: 0,
+          error: { error: 'proving_failed', message: 'witness build failed' },
+        },
+      },
+      {
+        id: 'ok-cancelled',
+        body: {
+          job_id: 'ok-cancelled',
+          kind: 'send',
+          status: 'cancelled',
+          progress: 0,
+          error: { error: 'cancelled', message: 'client cancel' },
+        },
+      },
+      {
+        // attest_balance completed: digests may be omitted; attestation present.
+        id: 'ok-attest',
+        body: {
+          job_id: 'ok-attest',
+          kind: 'attest_balance',
+          status: 'completed',
+          progress: 1,
+          result: { output_coin_ids: [], attestation: 'ff'.repeat(16) },
+        },
+      },
+    ];
+
+    for (const w of wellFormed) {
+      server.use(http.get(`${BASE}/v1/jobs/${w.id}`, () => HttpResponse.json(w.body)));
+      const { job } = await newClient().getJob(w.id);
+      expect(job.status).toBe(w.body.status);
+      expect(job.job_id).toBe(w.id);
+      if (job.status === 'completed') {
+        expect(job.result).toBeDefined();
+        expect(Array.isArray(job.result?.output_coin_ids)).toBe(true);
+      }
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        expect(job.error).toEqual(w.body.error);
+      }
+      if (job.status === 'awaiting_signature') {
+        expect(job.awaiting_signature?.send_counter).toBe(1);
+      }
+    }
+
+    // SSE well-formed terminal frames still yield and stop.
+    const completedBody = wellFormed.find((w) => w.id === 'ok-completed');
+    if (completedBody === undefined) {
+      throw new Error('fixture ok-completed missing');
+    }
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/ok-completed/stream`,
+        () =>
+          new HttpResponse(`event: complete\ndata: ${JSON.stringify(completedBody.body)}\n\n`, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    let lastJob: unknown;
+    for await (const frame of newClient().streamJob('ok-completed')) {
+      seen.push(frame.status);
+      lastJob = frame.job;
+    }
+    expect(seen).toEqual(['completed']);
+    expect(lastJob).toMatchObject({
+      status: 'completed',
+      result: { output_coin_ids: ['aa'.repeat(32)] },
+    });
+  });
+
+  it('SSE phase frame with awaiting_signature but no payload fails closed', async () => {
+    // Phase frames are not full job objects; status-specific payload still
+    // required so the stream path cannot surface awaiting_signature empty.
+    const frames = 'event: phase\ndata: {"status":"awaiting_signature","progress":0.5}\n\n';
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-await-empty/stream`,
+        () =>
+          new HttpResponse(frames, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    await expectStreamJobMessage(
+      'sse-await-empty',
+      'job status is awaiting_signature but payload is absent',
+    );
+  });
+
   it('requestJsonWithHeaders registers a live AbortSignal and aborts in flight', async () => {
     server.use(
       http.get(`${BASE}/v1/info`, async () => {

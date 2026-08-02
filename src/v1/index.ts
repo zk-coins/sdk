@@ -109,6 +109,8 @@ export {
   type V1JobStatusValue,
   type V1JobAccepted,
   type V1Job,
+  type V1SsePhasePayload,
+  type V1SseStreamFrame,
   type V1JobWithRetry,
   type V1JobResult,
   type V1JobErrorBody,

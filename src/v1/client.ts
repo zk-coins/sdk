@@ -82,6 +82,45 @@ export interface V1Job {
   error?: V1JobErrorBody;
 }
 
+/**
+ * Non-terminal SSE `phase` frame payload (§7.5 L2947 / L3033).
+ *
+ * Carries `status` / `progress`, optional diagnostic `phase`, and inline
+ * `awaiting_signature` when `status === "awaiting_signature"`. Not a full
+ * job object — no `job_id` / `kind` / terminal `result` / `error`.
+ */
+export interface V1SsePhasePayload {
+  status: V1JobStatusValue;
+  progress: number;
+  /** Diagnostic only — clients MUST NOT dispatch on this (§7.5). */
+  phase?: string;
+  awaiting_signature?: AwaitingSignature;
+}
+
+/**
+ * One frame yielded by {@link ZkCoinsV1Client.streamJob}.
+ *
+ * Discriminated by `full` (payload shape after parse), not by the SSE
+ * `event` name: the server uses `phase` / `complete` / `error` only as
+ * frame delimiters; clients dispatch on `status` (§7.5). Narrow with
+ * `frame.full` to learn whether `job` is a full {@link V1Job}.
+ */
+export type V1SseStreamFrame =
+  | {
+      event: string;
+      status: V1JobStatusValue;
+      /** Payload went through `parseJob` (terminal frames or full job JSON). */
+      full: true;
+      job: V1Job;
+    }
+  | {
+      event: string;
+      status: V1JobStatusValue;
+      /** Non-terminal phase-frame subset. */
+      full: false;
+      job: V1SsePhasePayload;
+    };
+
 export interface V1JobWithRetry {
   job: V1Job;
   /** Parsed `Retry-After` in ms; `null` when the header is absent. */
@@ -267,12 +306,17 @@ export class ZkCoinsV1Client {
    * `GET /v1/jobs/<job_id>/stream` — SSE. Dispatch **only** on `data.status`
    * (§7.5); `event:` names delimit frames (`phase` / `complete` / `error`)
    * but never drive control flow by themselves. `phase` field is ignored.
+   *
+   * Terminal `complete`/`error` frames carry the same job JSON as
+   * `GET /v1/jobs/<id>` and go through the same `parseJob` as polling —
+   * never a laxer SSE-only schema. Non-terminal `phase` frames are a
+   * status/progress subset (plus inline `awaiting_signature` when applicable).
    * Beleg: api/src/jobs.rs `stream_job` L137–150, `job_event_to_sse` L248–269.
    */
   async *streamJob(
     jobId: string,
     signal?: AbortSignal,
-  ): AsyncGenerator<{ event: string; status: V1JobStatusValue; job: unknown }, void, unknown> {
+  ): AsyncGenerator<V1SseStreamFrame, void, unknown> {
     if (jobId.length === 0) {
       throw new Error('streamJob: job_id must not be empty');
     }
@@ -317,10 +361,30 @@ export class ZkCoinsV1Client {
           }
           if (dataPayload.length === 0) continue;
           const parsed: unknown = JSON.parse(dataPayload);
-          const status = extractStatus(parsed);
+          const view = parseSseJobPayload(parsed);
           // Clients dispatch only on status — yield it explicitly.
-          yield { event: eventName, status, job: parsed };
-          if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          // Branch on `full` so the yielded value keeps the discriminated union
+          // (object-spread would collapse the two arms into one mixed type).
+          if (view.full) {
+            yield {
+              event: eventName,
+              status: view.status,
+              full: true,
+              job: view.job,
+            };
+          } else {
+            yield {
+              event: eventName,
+              status: view.status,
+              full: false,
+              job: view.job,
+            };
+          }
+          if (
+            view.status === 'completed' ||
+            view.status === 'failed' ||
+            view.status === 'cancelled'
+          ) {
             return;
           }
         }
@@ -598,11 +662,53 @@ function parseJobStatus(s: string): V1JobStatusValue {
   }
 }
 
-function extractStatus(data: unknown): V1JobStatusValue {
+/**
+ * Map one SSE `data:` JSON payload to a status + job view.
+ *
+ * - Full job objects (`job_id` present — poll shape and `complete`/`error`
+ *   frames) always go through `parseJob` (`full: true`).
+ * - Terminal statuses without a full job object still go through
+ *   `parseJob` so missing `result`/`error` fail with the same
+ *   messages as polling (no SSE bypass).
+ * - Non-terminal `phase` frames only carry `status` / `progress` /
+ *   optional diagnostic `phase`, plus inline `awaiting_signature` when
+ *   `status == "awaiting_signature"` (§7.5 L2947, L3033) (`full: false`).
+ */
+function parseSseJobPayload(
+  data: unknown,
+):
+  | { status: V1JobStatusValue; full: true; job: V1Job }
+  | { status: V1JobStatusValue; full: false; job: V1SsePhasePayload } {
   if (!isRecord(data) || typeof data.status !== 'string') {
     throw new Error('SSE/job payload missing status string');
   }
-  return parseJobStatus(data.status);
+  const status = parseJobStatus(data.status);
+  const isFullJobObject = typeof data.job_id === 'string' && typeof data.kind === 'string';
+
+  if (isFullJobObject || status === 'completed' || status === 'failed' || status === 'cancelled') {
+    // Full job JSON (poll shape / complete / error) — one shared parser.
+    const job = parseJob(data);
+    return { status: job.status, full: true, job };
+  }
+
+  // Phase-frame subset: progress is on the wire (api phase_event_data);
+  // status-specific awaiting_signature is required when applicable.
+  const job: V1SsePhasePayload = {
+    status,
+    progress: requireNumber(data, 'progress'),
+  };
+  if (typeof data.phase === 'string') {
+    job.phase = data.phase;
+  }
+  if (status === 'awaiting_signature') {
+    job.awaiting_signature = parseAwaitingSignature(
+      expectPresent(
+        data.awaiting_signature,
+        'job status is awaiting_signature but payload is absent',
+      ),
+    );
+  }
+  return { status, full: false, job };
 }
 
 function parseJobAccepted(data: unknown): V1JobAccepted {
@@ -630,6 +736,17 @@ function parseAwaitingSignature(data: unknown): AwaitingSignature {
   };
 }
 
+/**
+ * Parse a §7.5 job poll / terminal-SSE object. Fail-closed on terminal
+ * payload rules (mirror api/src/jobs.rs `job_to_json`):
+ *
+ * - `awaiting_signature` → `awaiting_signature` object with all nine fields
+ * - `completed` → `result` object (with `output_coin_ids: string[]`)
+ * - `failed` | `cancelled` → `error` object `{ error, message }`
+ *
+ * Optional on `result` only: `publisher_pubkey?`, `attestation?`, and the
+ * three digests when empty (attest_balance may omit them on the wire).
+ */
 function parseJob(data: unknown): V1Job {
   if (!isRecord(data)) throw new Error('job: expected object');
   const status = parseJobStatus(requireString(data, 'status'));
@@ -650,9 +767,10 @@ function parseJob(data: unknown): V1Job {
       ),
     );
   }
-  if (status === 'completed' && data.result !== undefined) {
-    if (!isRecord(data.result)) throw new Error('job.result: expected object');
-    const coinIds = data.result.output_coin_ids;
+  if (status === 'completed') {
+    const resultRaw = expectPresent(data.result, 'job status is completed but result is absent');
+    if (!isRecord(resultRaw)) throw new Error('job.result: expected object');
+    const coinIds = resultRaw.output_coin_ids;
     if (!Array.isArray(coinIds)) {
       throw new Error('job.result.output_coin_ids: expected array');
     }
@@ -664,27 +782,32 @@ function parseJob(data: unknown): V1Job {
         return c;
       }),
     };
-    if (typeof data.result.new_account_state_hash === 'string') {
-      job.result.new_account_state_hash = data.result.new_account_state_hash;
+    // Digest fields are required for mint/send/receive on the wire shape
+    // (§7.5 result = { ash, ocr, inr, output_coin_ids, … }) but may be
+    // empty/omitted for kind == "attest_balance" (api job_result_json).
+    // Presence is therefore not inventable — only copy when the server sent a string.
+    if (typeof resultRaw.new_account_state_hash === 'string') {
+      job.result.new_account_state_hash = resultRaw.new_account_state_hash;
     }
-    if (typeof data.result.output_coins_root === 'string') {
-      job.result.output_coins_root = data.result.output_coins_root;
+    if (typeof resultRaw.output_coins_root === 'string') {
+      job.result.output_coins_root = resultRaw.output_coins_root;
     }
-    if (typeof data.result.input_nullifiers_root === 'string') {
-      job.result.input_nullifiers_root = data.result.input_nullifiers_root;
+    if (typeof resultRaw.input_nullifiers_root === 'string') {
+      job.result.input_nullifiers_root = resultRaw.input_nullifiers_root;
     }
-    if (typeof data.result.publisher_pubkey === 'string') {
-      job.result.publisher_pubkey = data.result.publisher_pubkey;
+    if (typeof resultRaw.publisher_pubkey === 'string') {
+      job.result.publisher_pubkey = resultRaw.publisher_pubkey;
     }
-    if (typeof data.result.attestation === 'string') {
-      job.result.attestation = data.result.attestation;
+    if (typeof resultRaw.attestation === 'string') {
+      job.result.attestation = resultRaw.attestation;
     }
   }
-  if ((status === 'failed' || status === 'cancelled') && data.error !== undefined) {
-    if (!isRecord(data.error)) throw new Error('job.error: expected object');
+  if (status === 'failed' || status === 'cancelled') {
+    const errorRaw = expectPresent(data.error, `job status is ${status} but error is absent`);
+    if (!isRecord(errorRaw)) throw new Error('job.error: expected object');
     job.error = {
-      error: requireString(data.error, 'error'),
-      message: requireString(data.error, 'message'),
+      error: requireString(errorRaw, 'error'),
+      message: requireString(errorRaw, 'message'),
     };
   }
   return job;

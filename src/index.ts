@@ -235,6 +235,8 @@ export type {
   V1JobStatusValue,
   V1JobAccepted,
   V1Job,
+  V1SsePhasePayload,
+  V1SseStreamFrame,
   V1JobWithRetry,
   V1JobResult,
   V1JobErrorBody,
