@@ -168,7 +168,6 @@ export {
   signTransition,
   signTransitionTrace,
   signTransitionOverProofData,
-  signTransitionWithFixtureNonce,
   verify,
   commVerify,
   SECP256K1_ORDER,

@@ -29,9 +29,9 @@ import {
   aggregateVerify,
   bip340NormaliseSecret,
   commVerify,
-  signTransitionWithFixtureNonce,
   verify,
 } from '../../src/v1/index.js';
+import { signTransitionWithFixtureNonce } from '../fixtures/signTransitionWithFixtureNonce.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
@@ -615,9 +615,9 @@ describe('cross-rust: v1 transition / half-agg (Spec V.8 + randomized)', () => {
     }
   });
 
-  it('half_agg + aggregate_verify: 50 random two-member batches (shim-anchored)', () => {
-    // Fewer samples: each batch signs twice under the fixture nonce.
-    const BATCHES = 50;
+  it('half_agg + aggregate_verify: 100 random two-member batches (shim-anchored)', () => {
+    // Match the project gate: 100 independent batches per primitive.
+    const BATCHES = 100;
     for (let i = 0; i < BATCHES; i++) {
       const network = 'regtest' as const;
       const members = [];

@@ -32,7 +32,7 @@ describe('package barrel exports', () => {
       'serializeProofData',
       'hashProofData',
       'signTransition',
-      'signTransitionWithFixtureNonce',
+      'signTransitionTrace',
       'verify',
       'commVerify',
       'aggregateSig',
@@ -46,5 +46,11 @@ describe('package barrel exports', () => {
       expect(sdk[name], `${name} must be exported from the package root`).toBeDefined();
       expect(typeof sdk[name]).toBe('function');
     }
+  });
+
+  it('does not export the fixture-nonce signer (test-vector only; scalar leak if public)', () => {
+    // Deterministic k' does not bind m_SC — must never ship on the package root.
+    expect(Object.prototype.hasOwnProperty.call(sdk, 'signTransitionWithFixtureNonce')).toBe(false);
+    expect((sdk as Record<string, unknown>).signTransitionWithFixtureNonce).toBeUndefined();
   });
 });

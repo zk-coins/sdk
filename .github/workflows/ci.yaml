@@ -99,6 +99,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Require shim Cargo.lock (reproducible reference)
+        run: |
+          if [ ! -f test/cross-rust/shim/Cargo.lock ]; then
+            echo "::error::test/cross-rust/shim/Cargo.lock is missing. Cross-tests must pin the Rust reference with --locked."
+            exit 1
+          fi
+
       - name: Cache Cargo registry + shim build
         uses: actions/cache@v5
         with:
@@ -106,13 +113,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             test/cross-rust/shim/target
-          key: cross-shim-${{ runner.os }}-${{ hashFiles('test/cross-rust/shim/Cargo.toml') }}
+          key: cross-shim-${{ runner.os }}-${{ hashFiles('test/cross-rust/shim/Cargo.toml', 'test/cross-rust/shim/Cargo.lock', 'test/cross-rust/shim/src/**') }}
 
       - run: npm ci
 
-      - name: Build Rust shim
+      - name: Build Rust shim (locked)
         working-directory: test/cross-rust/shim
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Run cross-tests
         run: npm run test:cross

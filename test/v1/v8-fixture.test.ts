@@ -21,11 +21,11 @@ import {
   mStateString,
   serializeProofData,
   SECP256K1_ORDER,
-  signTransitionWithFixtureNonce,
   verify,
   type Network,
   type ProofData,
 } from '../../src/v1/index.js';
+import { signTransitionWithFixtureNonce } from '../fixtures/signTransitionWithFixtureNonce.js';
 
 const Point = schnorr.Point;
 const { Fn } = Point;

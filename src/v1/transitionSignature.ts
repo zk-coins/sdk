@@ -3,12 +3,11 @@
  *
  * Production nonce: BIP-340 nonce hygiene with fresh CSPRNG aux-rand on every
  * draw (including every step-3b redraw). Never reuses a nonce across two
- * commitments.
+ * commitments. This is the **only** nonce path shipped in the public package.
  *
- * Fixture nonce (`signTransitionWithFixtureNonce`): the V.8 deterministic
- * counter rule — **test-vector only, not normative for production**, and
- * **not** the default. Named so it cannot be mistaken for the production
- * path.
+ * The V.8 deterministic fixture-nonce signer lives under `test/fixtures/` —
+ * not here — because its k' does not bind `m_SC` and must not be callable by
+ * package consumers.
  *
  * Output wire shape (node `signature.rs` wallet contract):
  *   - `signature` = bytes(R) ‖ bytes(s)   (64 bytes)
@@ -222,12 +221,10 @@ function bip340Challenge(r: Uint8Array, pk: Uint8Array, mState: Uint8Array): big
 }
 
 /**
- * §3.2 steps 1–6 given a k'-draw callback and a redraw budget. Shared by
- * production and fixture paths so the even-y / redraw rules cannot diverge
- * between them.
+ * §3.2 steps 1–6 given a k'-draw callback and a redraw budget.
  *
- * `redrawBudget` is a required ordinary argument (no default): production and
- * fixture both pass the module redraw budget.
+ * `redrawBudget` is a required ordinary argument (no default). Production
+ * passes the module redraw budget with a CSPRNG-backed draw.
  */
 function signWithNonceDraws(
   d: bigint,
@@ -375,61 +372,6 @@ export function signTransitionOverProofData(input: {
     network: input.network,
     mSc: hashProofData(input.proofData),
   });
-}
-
-/**
- * **V.8 fixture nonce rule — test-vector only, not normative for production.**
- *
- * ```
- * masked   = d XOR int(tagged_hash("BIP0340/aux", 0x00×32))
- * rand_ctr = tagged_hash("BIP0340/nonce", masked ‖ Pk ‖ m_state ‖ u32-be(ctr))
- * k'       = int(rand_ctr) mod n
- * ```
- * starting at `ctr = 0`, incrementing on every §3.2 step-3b redraw and on
- * `k' = 0`. Step 1b even-y normalisation of `R'` is applied after each draw.
- *
- * **Do not call this in production.** Production nonces go through
- * {@link signTransition} (CSPRNG aux-rand). This function exists solely so
- * V.8 and the cross-rust parity suite are bit-for-bit reproducible.
- */
-export function signTransitionWithFixtureNonce(input: {
-  secretKey: Uint8Array;
-  network: Network;
-  mSc: Uint8Array;
-}): SignTrace {
-  const { d, dBytes, pkBytes } = bip340NormaliseSecret(input.secretKey);
-  const mState = mStateBytes(input.network);
-  const mSc = requireBytes(input.mSc, FIELD_LEN, 'mSc');
-
-  const aux = taggedHash('BIP0340/aux', new Uint8Array(32));
-  const masked = new Uint8Array(FIELD_LEN);
-  // dBytes and the tagged aux digest are fixed 32-byte buffers — no holes.
-  for (let i = 0; i < FIELD_LEN; i++) {
-    masked[i] = dBytes[i]! ^ aux[i]!;
-  }
-
-  return signWithNonceDraws(
-    d,
-    pkBytes,
-    mSc,
-    mState,
-    (ctr) => {
-      const ctrBe = new Uint8Array(4);
-      ctrBe[0] = (ctr >>> 24) & 0xff;
-      ctrBe[1] = (ctr >>> 16) & 0xff;
-      ctrBe[2] = (ctr >>> 8) & 0xff;
-      ctrBe[3] = ctr & 0xff;
-      // Preimage = masked ‖ Pk ‖ m_state ‖ u32-be(ctr)
-      const preimage = new Uint8Array(masked.length + pkBytes.length + mState.length + 4);
-      preimage.set(masked, 0);
-      preimage.set(pkBytes, masked.length);
-      preimage.set(mState, masked.length + pkBytes.length);
-      preimage.set(ctrBe, masked.length + pkBytes.length + mState.length);
-      const randCtr = taggedHash('BIP0340/nonce', preimage);
-      return Fn.create(bytesToBigint(randCtr));
-    },
-    REDRAW_BUDGET,
-  );
 }
 
 /**

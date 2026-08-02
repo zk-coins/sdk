@@ -11,6 +11,7 @@ implementation.
 | Piece                | Role                                                                                                                                                  |
 | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `shim/`              | Standalone JSON-stdin CLI (`zkcoins-sdk-shim`) using real `bitcoin` / `bip39` / `sha2` crates (same versions as `zk-coins/app/rust`). **Not a mock.** |
+| `Cargo.lock`         | Checked-in lockfile for the shim. CI builds with `cargo build --locked` so the reference cannot drift without a PR.                                   |
 | `cross.test.ts`      | Spawns the release binary and compares JS vs Rust for each op on 100 randomized inputs (plus fixed vectors).                                          |
 | `npm run test:cross` | Vitest config `vitest.cross.config.ts`. CI job `cross-tests` builds the shim then runs this.                                                          |
 
@@ -39,28 +40,35 @@ Rust against a test-local reimplementation, not the SDK — so that op is
 omitted rather than claimed. Mnemonic → account still covers the shared
 `accountFromSeed` helper with BIP-39's 64-byte seed.
 
-**Explicitly not in this gate yet** (SDK has no implementation):
+### Implemented in the SDK, not yet in this cross-rust gate
 
-- Spec V.2-ext all-hardened + HKDF key hierarchy
-- V.4 Poseidon digests (`E'₂₅₆`, `nk_commit`, `asset_id`, …) beyond the
-  already-shipped Poseidon module's own unit vectors
-- V.10 note encryption, V.11 nflog, V.12 NIP-17 wire
+The following are **implemented and exported** by `@zkcoins/sdk` (unit /
+fixture tests pin behaviour), but are **open named gaps** in this JS↔Rust
+parity suite — not “unimplemented”, and not “impossible”:
 
-Those rows land as additional ops in this suite when the corresponding
-SDK modules land. Expanding the gate without a JS implementation would
-only re-test Rust against itself.
+| Area                                                                                               | SDK location                                                        | Why still open in this gate                                                                 |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Spec V.2-ext all-hardened SPEND hierarchy (`m/1798'/account'/0'/i'`)                               | `src/v1/keys.ts`                                                    | No matching shim op yet; unit tests + V.2-ext pins cover JS                                 |
+| V.4 Poseidon-over-Goldilocks, `E(·)`, `Hc`, domain hashes (`nk_commit`, `asset_id`, …)             | `src/poseidon/`                                                     | Pinned against Rust-generated unit vectors in `test/poseidon.test.ts`; no live shim ops yet |
+| Invoice / delivery credential, OwnershipProof, NIP-01 event id/sign/verify, Bech32m `zk` addresses | `src/v1/delivery.ts`, `ownership.ts`, `nostrEvent.ts`, `bech32m.ts` | Crypto paths exist on the JS side; no corresponding cross-rust ops yet                      |
+
+Those rows land as additional ops here when a shim dispatch + generator
+block is added. Expanding the gate without a JS implementation would only
+re-test Rust against itself; expanding it without a shim op would only
+re-test JS against itself.
 
 **V.8 half-aggregation / sign-to-contract** is in the gate: the SDK
 implements §3.2 + §1.7.10 under `src/v1/`, and the cross suite pins the
-normative fixture plus randomised fixture-nonce draws against the shim.
+normative fixture plus randomised fixture-nonce draws (fixture signer lives
+under `test/fixtures/` — not the public package surface) against the shim.
 A shim that re-implements the same formula only gives random-coverage
 beyond V.8; **V.8 itself is the Spec anchor**.
 
-Address hashing in the live legacy surface is **SHA-256(compressed pk₀)**
+Address hashing in the live **legacy** surface is **SHA-256(compressed pk₀)**
 — matching the pure-JS SDK and the historical WASM client contract the
 SDK was written against. Spec-conformant Poseidon owner
-(`Hc` / `digest_to_bytes`) is part of the V.2-ext/V.4 follow-up, not
-silently substituted here.
+(`Hc` / `digest_to_bytes`) is available on the V.1 / Poseidon surface and
+is unit-pinned; it is not silently substituted into the legacy address path.
 
 ## Reproducible random samples
 
@@ -76,11 +84,14 @@ On mismatch the assertion message includes the seed and the concrete
 input (entropy, hash, ash/ocr, …) so the failing sample can be copied
 into a fixed vector without re-running the full stream.
 
+Half-aggregation draws **100 independent two-member batches** (same count
+as every other randomized primitive).
+
 ## Failure model
 
 - Missing shim binary → the test suite **fails** (does not skip).
-- Missing `test/cross-rust/shim/Cargo.toml` → CI **fails** (no
-  `if exists == 'true'` skip).
+- Missing `test/cross-rust/shim/Cargo.toml` or `Cargo.lock` → CI **fails**
+  (no `if exists == 'true'` skip).
 - Any JS/Rust mismatch on a compared field → CI **fails**.
 
 A gate that cannot go red is not a gate. The deliberate break exercise
@@ -90,8 +101,8 @@ primitive, red run, revert).
 ## Local use
 
 ```bash
-# One-time / after shim changes:
-cargo build --release --manifest-path test/cross-rust/shim/Cargo.toml
+# One-time / after shim changes (locked to Cargo.lock):
+cargo build --release --locked --manifest-path test/cross-rust/shim/Cargo.toml
 
 # Run parity suite:
 npm run test:cross

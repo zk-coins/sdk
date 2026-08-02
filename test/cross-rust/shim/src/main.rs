@@ -443,8 +443,8 @@ struct TransitionSignResult {
     nonce_counter: u32,
 }
 
-/// V.8 fixture nonce rule (test-vector only). Mirrors the JS
-/// `signTransitionWithFixtureNonce`.
+/// V.8 fixture nonce rule (test-vector only). Mirrors the JS test fixture
+/// `test/fixtures/signTransitionWithFixtureNonce.ts` (not a public SDK export).
 fn transition_sign_fixture(
     secret_key_hex: &str,
     m_sc_hex: &str,

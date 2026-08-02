@@ -23,7 +23,13 @@ import {
   beBytesToU64,
   u64ToBeBytes,
 } from '../src/poseidon/goldilocks.js';
-import { poseidonPermute, hashNoPad, digestsEqual, ZERO_DIGEST } from '../src/poseidon/poseidon.js';
+import {
+  poseidonPermute,
+  hashNoPad,
+  digestsEqual,
+  ZERO_DIGEST,
+  type Digest,
+} from '../src/poseidon/poseidon.js';
 import {
   EncodingError,
   HcInput,
@@ -402,6 +408,37 @@ describe('digestToBytes / digestFromBytes', () => {
       expect((err as EncodingError).kind).toBe('InvalidDigestLength');
     }
   });
+
+  it('digestFromHex rejects partial-nibble garbage that parseInt would accept', () => {
+    // parseInt('0g', 16) === 0 — without a strict alphabet check this would
+    // silently decode as a different (wrong) digest instead of throwing.
+    const good = digestToHex(nflogEmpty());
+    const with0g = '0g' + good.slice(2);
+    const withG0 = 'g0' + good.slice(2);
+    expect(with0g.length).toBe(64);
+    expect(withG0.length).toBe(64);
+    try {
+      digestFromHex(with0g);
+      expect.unreachable('0g must throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EncodingError);
+      expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+    }
+    try {
+      digestFromHex(withG0);
+      expect.unreachable('g0 must throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EncodingError);
+      expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+    }
+    // Trailing bad nibble pair also rejected (not only leading).
+    try {
+      digestFromHex(good.slice(0, 62) + '0g');
+      expect.unreachable('trailing 0g must throw');
+    } catch (err) {
+      expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -413,6 +450,45 @@ describe('hc', () => {
     const a = hc(TAG_NK_COMMIT, [HcInput.byteString(new Uint8Array(32).fill(1))]);
     const b = hc(TAG_NK_COMMIT, [HcInput.byteString(new Uint8Array(32).fill(1))]);
     expect(digestsEqual(a, b)).toBe(true);
+  });
+
+  it('throws on unknown HcInput.type (fail-closed; never silently skip)', () => {
+    const forged = { type: 'NotARealKind', bytes: new Uint8Array(0) } as unknown as ReturnType<
+      typeof HcInput.byteString
+    >;
+    try {
+      hc(TAG_NK_COMMIT, [forged]);
+      expect.unreachable('unknown type must throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EncodingError);
+      expect((err as EncodingError).kind).toBe('UnknownHcInputType');
+    }
+  });
+
+  it('throws on non-canonical digest limbs (≥ p) instead of reducing', () => {
+    // Two distinct malformed digests that reduce to the same residue class
+    // under silent % p would otherwise collide inside hc.
+    const nonCanon: Digest = [GOLDILOCKS_P, 0n, 0n, 0n];
+    const nonCanonPlus: Digest = [GOLDILOCKS_P + 1n, 0n, 0n, 0n];
+    try {
+      hc(TAG_NK_COMMIT, [HcInput.digest(nonCanon)]);
+      expect.unreachable('limb = p must throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EncodingError);
+      expect((err as EncodingError).kind).toBe('NonCanonicalDigestLimb');
+    }
+    try {
+      hc(TAG_NK_COMMIT, [HcInput.digest(nonCanonPlus)]);
+      expect.unreachable('limb = p+1 must throw');
+    } catch (err) {
+      expect((err as EncodingError).kind).toBe('NonCanonicalDigestLimb');
+    }
+    try {
+      encodeDigest(nonCanon);
+      expect.unreachable('encodeDigest must reject non-canonical limbs');
+    } catch (err) {
+      expect((err as EncodingError).kind).toBe('NonCanonicalDigestLimb');
+    }
   });
 
   it('is sensitive to tag, byte, digest, numeric, and argument order', () => {

@@ -19,10 +19,10 @@ import {
   signTransition,
   signTransitionOverProofData,
   signTransitionTrace,
-  signTransitionWithFixtureNonce,
   verify,
   type ProofData,
 } from '../../src/v1/index.js';
+import { signTransitionWithFixtureNonce } from '../fixtures/signTransitionWithFixtureNonce.js';
 
 const SK1 = hexToBytes('22f508c0a93b29fa87ca8d9abcec996f01620656cd7a7e4ab5418b2e76beccf4');
 

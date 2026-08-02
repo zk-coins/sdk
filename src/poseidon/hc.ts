@@ -31,7 +31,11 @@ export type EncodingErrorKind =
   | 'ByteStringTooLong'
   | 'SmallNumericOutOfRange'
   | 'NonCanonicalDigestLimb'
-  | 'InvalidDigestLength';
+  | 'InvalidDigestLength'
+  | 'UnknownHcInputType';
+
+/** Strict hex body: full nibbles only (`0-9` `a-f` `A-F`). Rejects partials like `0g`. */
+const HEX_BODY = /^(?:[0-9a-fA-F]{2})+$/;
 
 export class EncodingError extends Error {
   public readonly kind: EncodingErrorKind;
@@ -106,9 +110,25 @@ export function encodeByteString(bytes: Uint8Array): bigint[] {
 /**
  * Encode a digest: the four limbs, no length prefix.
  * Corresponds to `encode_digest`.
+ * Each limb must already be canonical in `[0, p)`; never silently reduced.
  */
 export function encodeDigest(d: Digest): readonly [bigint, bigint, bigint, bigint] {
+  assertCanonicalDigest(d, 'encodeDigest');
   return d;
+}
+
+/** Fail-closed: every limb of a digest input must be in `[0, p)`. */
+function assertCanonicalDigest(d: Digest, label: string): void {
+  for (let i = 0; i < 4; i++) {
+    const limb = d[i]!;
+    if (limb < 0n || limb >= GOLDILOCKS_P) {
+      throw new EncodingError(
+        'NonCanonicalDigestLimb',
+        `${label}: limb ${i} value ${limb.toString()} >= p (or negative)`,
+        { limbIndex: i, value: limb },
+      );
+    }
+  }
 }
 
 /**
@@ -189,6 +209,8 @@ export function digestToHex(d: Digest): string {
 
 /**
  * Parse a 64-char hex digest (optional 0x prefix) via `digestFromBytes`.
+ * Alphabet is strict: every nibble must be `0-9`/`a-f`/`A-F`. `parseInt` alone
+ * is not sufficient — e.g. `parseInt('0g', 16) === 0` would silently corrupt.
  */
 export function digestFromHex(hex: string): Digest {
   const h = hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex;
@@ -199,15 +221,17 @@ export function digestFromHex(hex: string): Digest {
       { length: h.length },
     );
   }
+  if (!HEX_BODY.test(h)) {
+    throw new EncodingError(
+      'InvalidDigestLength',
+      'digestFromHex: non-hex character in digest (must be 0-9a-fA-F only)',
+      { length: h.length },
+    );
+  }
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
-    const byte = Number.parseInt(h.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
-      throw new EncodingError('InvalidDigestLength', `digestFromHex: invalid hex at byte ${i}`, {
-        length: h.length,
-      });
-    }
-    bytes[i] = byte;
+    // Alphabet already validated; parseInt is now safe for full-nibble pairs.
+    bytes[i] = Number.parseInt(h.slice(i * 2, i * 2 + 2), 16);
   }
   return digestFromBytes(bytes);
 }
@@ -216,6 +240,10 @@ export function digestFromHex(hex: string): Digest {
  * Hc(tag, inputs…): single hash_no_pad over the concatenated encodings.
  * `tag` is absorbed as a byte-string (UTF-8 of the full "zkCoins/v1/<Context>").
  * Corresponds to `hc` in encoding.rs.
+ *
+ * Fail-closed: unknown `HcInput.type` throws; non-canonical digest limbs
+ * (`≥ p`) throw — never silently skipped or reduced (would collide distinct
+ * malformed inputs onto the same preimage).
  */
 export function hc(tag: string, inputs: readonly HcInput[]): Digest {
   const elements: bigint[] = encodeByteString(new TextEncoder().encode(tag));
@@ -225,11 +253,21 @@ export function hc(tag: string, inputs: readonly HcInput[]): Digest {
         elements.push(...encodeByteString(input.bytes));
         break;
       case 'Digest':
+        assertCanonicalDigest(input.digest, 'hc Digest');
         elements.push(input.digest[0], input.digest[1], input.digest[2], input.digest[3]);
         break;
       case 'SmallNumeric':
         elements.push(encodeSmallNumeric(input.value));
         break;
+      default: {
+        // Exhaustiveness: a forged / future discriminant must not be dropped.
+        const unknown = input as { type: string };
+        throw new EncodingError(
+          'UnknownHcInputType',
+          `hc: unknown HcInput.type ${JSON.stringify(unknown.type)}`,
+          { type: String(unknown.type) },
+        );
+      }
     }
   }
   return hashNoPad(elements);
