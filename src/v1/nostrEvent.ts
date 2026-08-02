@@ -4,8 +4,11 @@
  * Port of `node/node/src/v1/nostr/event.rs` id framing:
  *   id = SHA-256(utf8(compact_json([0, pubkey_hex, created_at, kind, tags, content])))
  *
- * String escaping is the classical NIP-01 trap — only the seven classical
- * escapes; every other code point is raw UTF-8 (no `\uXXXX`).
+ * String escaping (NIP-01 + RFC 8259 JSON):
+ *   - classical short escapes for `"`, `\`, `\n`, `\r`, `\t`, `\b`, `\f`
+ *   - remaining control characters U+0000..U+001F as `\u00xx`
+ *   - every other code point (including non-ASCII / non-BMP) as raw UTF-8 —
+ *     no `\uXXXX` for umlauts or emoji (the classical NIP-01 trap)
  */
 
 import { schnorr } from '@noble/curves/secp256k1.js';
@@ -31,7 +34,8 @@ export interface NostrEventJson {
 
 /**
  * Escape a string under the NIP-01 id-serialization rule and wrap it in
- * double quotes.
+ * double quotes. Control characters outside the seven classical short
+ * escapes are emitted as `\u00xx` so the preimage is valid compact JSON.
  */
 export function escapeNip01String(s: string): string {
   let out = '"';
@@ -58,8 +62,14 @@ export function escapeNip01String(s: string): string {
       case '\u000C':
         out += '\\f';
         break;
-      default:
-        out += ch;
+      default: {
+        const cp = ch.codePointAt(0);
+        if (cp !== undefined && cp <= 0x1f) {
+          out += `\\u${cp.toString(16).padStart(4, '0')}`;
+        } else {
+          out += ch;
+        }
+      }
     }
   }
   out += '"';

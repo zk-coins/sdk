@@ -11,13 +11,17 @@ import { setupServer } from 'msw/node';
 import { HDKey } from '@scure/bip32';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
+import { sha256 } from '@noble/hashes/sha2.js';
+
 import {
   addressFromParts,
   assertOutputDeliveries,
   assertTransitionRequest,
+  computeNip01EventId,
   DeliveryCredentialError,
   encodeHexLower,
   encodeZkAddress,
+  escapeNip01String,
   invoiceMessage,
   parseDeliveryCredential,
   parseU128Decimal,
@@ -26,6 +30,7 @@ import {
   placeDeliveryCredential,
   profileInvoiceMessage,
   seedFromMnemonicV1,
+  serializeNip01IdPreimage,
   signNip01Event,
   transitionRequestToJson,
   verifyDeliveryCredential,
@@ -409,6 +414,56 @@ describe('profile delivery credential', () => {
       ),
     ).toThrow(/relays/);
   });
+
+  it('requires name_sig as 64-byte hex (undefined/null/number refuse)', () => {
+    // Without requireStringField, undefined/null/number name_sig slipped through.
+    const cases: unknown[] = [undefined, null, 1, true, { hex: 'ab' }];
+    for (const name_sig of cases) {
+      const { event, address } = buildValidProfile({ network: 'regtest' });
+      const content = JSON.parse(event.content) as {
+        zkcoins: Record<string, unknown>;
+      };
+      if (name_sig === undefined) {
+        delete content.zkcoins.name_sig;
+      } else {
+        content.zkcoins.name_sig = name_sig;
+      }
+      // Re-sign so event id/sig stay consistent with content (shape check runs after sig).
+      const resigned = signNip01Event({
+        secretKey: hex32(OP_SECRET_HEX),
+        createdAt: event.created_at,
+        kind: 0,
+        tags: event.tags,
+        content: JSON.stringify(content),
+      });
+      expect(() =>
+        verifyDeliveryCredential(
+          { type: 'profile', event: resigned },
+          { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+          { network: 'regtest' },
+        ),
+      ).toThrow(/name_sig must be a string/);
+    }
+
+    // Wrong hex width is also refused (string present but not 64-byte).
+    const { event, address } = buildValidProfile({ network: 'regtest' });
+    const content = JSON.parse(event.content) as { zkcoins: Record<string, unknown> };
+    content.zkcoins.name_sig = 'ab'.repeat(32); // 32 bytes, not 64
+    const resigned = signNip01Event({
+      secretKey: hex32(OP_SECRET_HEX),
+      createdAt: event.created_at,
+      kind: 0,
+      tags: event.tags,
+      content: JSON.stringify(content),
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: resigned },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/name_sig/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -679,6 +734,48 @@ describe('NIP-01 event id and V.2-ext key pins', () => {
     expect(event.pubkey).toBe(OP_PUBKEY_HEX);
     expect(() => verifyNip01Event(event)).not.toThrow();
     expect(() => verifyNip01Event({ ...event, id: '00'.repeat(32) })).toThrow(/id mismatch/);
+  });
+
+  it('escapeNip01String escapes remaining control characters as \\u00xx', () => {
+    // Independent of self-sign/self-verify: preimage bytes differ when U+0001
+    // is left raw vs escaped — event ids must match the escaped form.
+    expect(escapeNip01String('a\u0001b')).toBe('"a\\u0001b"');
+    expect(escapeNip01String('a\u0000b')).toBe('"a\\u0000b"');
+    expect(escapeNip01String('a\u001fb')).toBe('"a\\u001fb"');
+    // Classical short escapes still preferred over \\u00xx.
+    expect(escapeNip01String('a\nb\tc')).toBe('"a\\nb\\tc"');
+    // Non-ASCII stays raw UTF-8 (no \\u00e4).
+    expect(escapeNip01String('ä')).toBe('"ä"');
+    expect(escapeNip01String('ä').includes('\\u')).toBe(false);
+
+    const pubkey = hex32(OP_PUBKEY_HEX);
+    const content = 'ctrl\u0001end';
+    const preimage = serializeNip01IdPreimage({
+      pubkey,
+      createdAt: 1_700_000_000,
+      kind: 0,
+      tags: [['t', 'x\u0002y']],
+      content,
+    });
+    expect(preimage).toContain('\\u0001');
+    expect(preimage).toContain('\\u0002');
+    // Raw U+0001 byte must not appear in the preimage.
+    expect(preimage.includes('\u0001')).toBe(false);
+
+    const id = computeNip01EventId({
+      pubkey,
+      createdAt: 1_700_000_000,
+      kind: 0,
+      tags: [['t', 'x\u0002y']],
+      content,
+    });
+    // Independent vector: recompute SHA-256 of the preimage outside the helper.
+    const expected = sha256(new TextEncoder().encode(preimage));
+    expect(encodeHexLower(id)).toBe(encodeHexLower(expected));
+    // Distinct from the unescaped (non-JSON) preimage id.
+    const rawBad = `[0,"${OP_PUBKEY_HEX}",1700000000,0,[["t","x\u0002y"]],"ctrl\u0001end"]`;
+    const rawId = sha256(new TextEncoder().encode(rawBad));
+    expect(encodeHexLower(id)).not.toBe(encodeHexLower(rawId));
   });
 
   it('op_pubkey and sk₀ match the V.2-ext / V.12 pins', () => {

@@ -26,6 +26,7 @@ import {
 } from './delivery.js';
 import { redactBearerToken, V1ApiError } from './errors.js';
 import { expectPresent } from './expectPresent.js';
+import { decodeHexExact } from './hex.js';
 import type { Network } from './mstate.js';
 import {
   buildOwnershipProof,
@@ -401,13 +402,14 @@ export class ZkCoinsV1Client {
         const { value, done } = await reader.read();
         if (done) return;
         buffer += decoder.decode(value, { stream: true });
-        let sep: number;
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
+        let boundary = findSseFrameBoundary(buffer);
+        while (boundary !== null) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.length);
           let eventName = 'message';
           let dataPayload = '';
-          for (const line of frame.split('\n')) {
+          // SSE: lines end with CRLF, LF, or CR (WHATWG / HTML Living Standard).
+          for (const line of frame.split(/\r\n|\n|\r/)) {
             if (line.startsWith(':')) continue;
             if (line.startsWith('event:')) {
               eventName = line.slice('event:'.length).trim();
@@ -417,7 +419,10 @@ export class ZkCoinsV1Client {
               dataPayload = dataPayload.length === 0 ? piece : `${dataPayload}\n${piece}`;
             }
           }
-          if (dataPayload.length === 0) continue;
+          if (dataPayload.length === 0) {
+            boundary = findSseFrameBoundary(buffer);
+            continue;
+          }
           const parsed: unknown = JSON.parse(dataPayload);
           const view = parseSseJobPayload(parsed);
           // Clients dispatch only on status — yield it explicitly.
@@ -445,6 +450,7 @@ export class ZkCoinsV1Client {
           ) {
             return;
           }
+          boundary = findSseFrameBoundary(buffer);
         }
       }
     } finally {
@@ -802,15 +808,18 @@ function parseAwaitingSignature(data: unknown): AwaitingSignature {
  * - `completed` → `result` object (with `output_coin_ids: string[]`)
  * - `failed` | `cancelled` → `error` object `{ error, message }`
  *
- * Optional on `result` only: `publisher_pubkey?`, `attestation?`, and the
- * three digests when empty (attest_balance may omit them on the wire).
+ * For `kind ∈ {mint,send,receive}` a completed result **must** carry the
+ * three digests as 32-byte hex (`new_account_state_hash`, `output_coins_root`,
+ * `input_nullifiers_root`) plus hex-typed `output_coin_ids`. Only
+ * `attest_balance` may omit digests (api `job_result_json`).
  */
 function parseJob(data: unknown): V1Job {
   if (!isRecord(data)) throw new Error('job: expected object');
   const status = parseJobStatus(requireString(data, 'status'));
+  const kind = requireString(data, 'kind');
   const job: V1Job = {
     job_id: requireString(data, 'job_id'),
-    kind: requireString(data, 'kind'),
+    kind,
     status,
     progress: requireNumber(data, 'progress'),
   };
@@ -832,28 +841,45 @@ function parseJob(data: unknown): V1Job {
     if (!Array.isArray(coinIds)) {
       throw new Error('job.result.output_coin_ids: expected array');
     }
-    job.result = {
-      output_coin_ids: coinIds.map((c, i) => {
-        if (typeof c !== 'string') {
-          throw new Error(`job.result.output_coin_ids[${i}]: expected string`);
-        }
-        return c;
-      }),
-    };
-    // Digest fields are required for mint/send/receive on the wire shape
-    // (§7.5 result = { ash, ocr, inr, output_coin_ids, … }) but may be
-    // empty/omitted for kind == "attest_balance" (api job_result_json).
-    // Presence is therefore not inventable — only copy when the server sent a string.
-    if (typeof resultRaw.new_account_state_hash === 'string') {
-      job.result.new_account_state_hash = resultRaw.new_account_state_hash;
-    }
-    if (typeof resultRaw.output_coins_root === 'string') {
-      job.result.output_coins_root = resultRaw.output_coins_root;
-    }
-    if (typeof resultRaw.input_nullifiers_root === 'string') {
-      job.result.input_nullifiers_root = resultRaw.input_nullifiers_root;
+    const output_coin_ids = coinIds.map((c, i) => {
+      if (typeof c !== 'string') {
+        throw new Error(`job.result.output_coin_ids[${i}]: expected string`);
+      }
+      decodeHexExact(c, 32, `job.result.output_coin_ids[${i}]`);
+      return c;
+    });
+    job.result = { output_coin_ids };
+
+    const requiresDigests = kind === 'mint' || kind === 'send' || kind === 'receive';
+    if (requiresDigests) {
+      job.result.new_account_state_hash = requireResultHex32(
+        resultRaw,
+        'new_account_state_hash',
+        kind,
+      );
+      job.result.output_coins_root = requireResultHex32(resultRaw, 'output_coins_root', kind);
+      job.result.input_nullifiers_root = requireResultHex32(
+        resultRaw,
+        'input_nullifiers_root',
+        kind,
+      );
+    } else {
+      // attest_balance (and any future non-transition kind): digests optional.
+      if (typeof resultRaw.new_account_state_hash === 'string') {
+        decodeHexExact(resultRaw.new_account_state_hash, 32, 'job.result.new_account_state_hash');
+        job.result.new_account_state_hash = resultRaw.new_account_state_hash;
+      }
+      if (typeof resultRaw.output_coins_root === 'string') {
+        decodeHexExact(resultRaw.output_coins_root, 32, 'job.result.output_coins_root');
+        job.result.output_coins_root = resultRaw.output_coins_root;
+      }
+      if (typeof resultRaw.input_nullifiers_root === 'string') {
+        decodeHexExact(resultRaw.input_nullifiers_root, 32, 'job.result.input_nullifiers_root');
+        job.result.input_nullifiers_root = resultRaw.input_nullifiers_root;
+      }
     }
     if (typeof resultRaw.publisher_pubkey === 'string') {
+      decodeHexExact(resultRaw.publisher_pubkey, 32, 'job.result.publisher_pubkey');
       job.result.publisher_pubkey = resultRaw.publisher_pubkey;
     }
     if (typeof resultRaw.attestation === 'string') {
@@ -869,6 +895,46 @@ function parseJob(data: unknown): V1Job {
     };
   }
   return job;
+}
+
+/** Required 32-byte lowercase hex digest on a completed mint/send/receive result. */
+function requireResultHex32(
+  result: Record<string, unknown>,
+  key: 'new_account_state_hash' | 'output_coins_root' | 'input_nullifiers_root',
+  kind: string,
+): string {
+  const v = result[key];
+  if (typeof v !== 'string') {
+    throw new Error(
+      `job.result.${key}: required 32-byte hex for completed kind=${kind} (fail-closed)`,
+    );
+  }
+  decodeHexExact(v, 32, `job.result.${key}`);
+  return v;
+}
+
+/**
+ * Locate the next SSE event-stream frame boundary.
+ *
+ * WHATWG / HTML Living Standard allow CRLF, LF, or CR as line terminators;
+ * a blank line (two consecutive terminators) ends a frame. Prefer the
+ * earliest match among `\r\n\r\n`, `\n\n`, and `\r\r`.
+ */
+function findSseFrameBoundary(buffer: string): { index: number; length: number } | null {
+  let best: { index: number; length: number } | null = null;
+  const candidates: ReadonlyArray<readonly [string, number]> = [
+    ['\r\n\r\n', 4],
+    ['\n\n', 2],
+    ['\r\r', 2],
+  ];
+  for (const [sep, length] of candidates) {
+    const index = buffer.indexOf(sep);
+    if (index === -1) continue;
+    if (best === null || index < best.index) {
+      best = { index, length };
+    }
+  }
+  return best;
 }
 
 function parsePullChallenge(data: unknown): PullChallenge {

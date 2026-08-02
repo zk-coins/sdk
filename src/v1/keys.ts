@@ -10,7 +10,8 @@
  */
 
 import { HDKey } from '@scure/bip32';
-import { mnemonicToSeedSync } from '@scure/bip39';
+import { mnemonicToSeedSync, validateMnemonic } from '@scure/bip39';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 
 import { expectPresent } from './expectPresent.js';
 import { bip340NormaliseSecret } from './transitionSignature.js';
@@ -88,6 +89,9 @@ export function deriveSk0(seed: Uint8Array, account: number): SpendKey {
 /**
  * BIP-39 → 64-byte seed for v1 (§1.2): empty passphrase only.
  * A non-empty passphrase is a v2 feature and is refused here.
+ *
+ * Validates wordlist membership and BIP-39 checksum before deriving —
+ * a typo must not silently produce a different, unrecoverable account.
  */
 export function seedFromMnemonicV1(mnemonic: string, passphrase?: string): Uint8Array {
   if (passphrase !== undefined && passphrase.length > 0) {
@@ -97,6 +101,11 @@ export function seedFromMnemonicV1(mnemonic: string, passphrase?: string): Uint8
   }
   if (typeof mnemonic !== 'string' || mnemonic.trim().length === 0) {
     throw new Error('seedFromMnemonicV1: mnemonic is required');
+  }
+  if (!validateMnemonic(mnemonic, wordlist)) {
+    throw new Error(
+      'seedFromMnemonicV1: invalid BIP-39 mnemonic (unknown word, wrong word count, or bad checksum)',
+    );
   }
   return mnemonicToSeedSync(mnemonic, '');
 }

@@ -11,12 +11,15 @@
  *
  * Runtime checks still enforce non-empty lists and reject a sneaked
  * `fee_address` for plain-JS callers that bypass the type checker.
+ * Hex fields are form-checked (32-byte lowercase); decimal amount strings
+ * are canonical `0|[1-9][0-9]*`; issuance v1 forbids v2-only fields.
  *
  * `OutputTemplate.delivery` is the closed tagged union from §7.5; unknown
  * `type` values are rejected at parse time (never passed through).
  */
 
-import { parseDeliveryCredential, type DeliveryCredential } from './delivery.js';
+import { parseDeliveryCredential, parseU128Decimal, type DeliveryCredential } from './delivery.js';
+import { decodeHexExact } from './hex.js';
 
 export type { DeliveryCredential } from './delivery.js';
 
@@ -97,20 +100,15 @@ export type TransitionRequest =
   | TransitionRequestReceive;
 
 /**
- * Runtime presence check for callers that are not type-checked.
+ * Runtime presence + form check for callers that are not type-checked.
  * Accepts `unknown` so tests and plain-JS callers can exercise the matrix
  * without TypeScript casts. Throws with a named field; never coerces.
+ *
+ * Returns a **normalised wire object** (only defined fields, validated hex /
+ * decimal strings, closed delivery unions) so a sneaked number or v2-only
+ * field cannot ride through after a successful assert.
  */
-function field(obj: object, key: string): unknown {
-  return Reflect.get(obj, key);
-}
-
-/**
- * Shape-level presence matrix. Does **not** run §4.3 crypto — that is
- * {@link assertTransitionRequestDeliveries} / the client's submit path,
- * which needs network + optional pin store.
- */
-export function assertTransitionRequest(body: unknown): asserts body is TransitionRequest {
+export function assertTransitionRequest(body: unknown): TransitionRequest {
   if (typeof body !== 'object' || body === null) {
     throw new Error('TransitionRequest: expected object');
   }
@@ -122,79 +120,77 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
     );
   }
 
-  const subject = field(body, 'subject');
-  if (typeof subject !== 'string' || subject.length === 0) {
-    throw new Error('TransitionRequest: subject is required');
-  }
-  const nextPubkey = field(body, 'next_pubkey');
-  if (typeof nextPubkey !== 'string' || nextPubkey.length === 0) {
-    throw new Error('TransitionRequest: next_pubkey is required');
-  }
-  const npkRand = field(body, 'npk_rand');
-  if (typeof npkRand !== 'string' || npkRand.length === 0) {
-    throw new Error('TransitionRequest: npk_rand is required');
+  const subject = requireNonEmptyString(body, 'subject');
+  const next_pubkey = requireHex32(body, 'next_pubkey');
+  const npk_rand = requireHex32(body, 'npk_rand');
+
+  let publisher_pubkey: string | undefined;
+  if (field(body, 'publisher_pubkey') !== undefined) {
+    publisher_pubkey = requireHex32(body, 'publisher_pubkey');
   }
 
   const kind = field(body, 'kind');
   switch (kind) {
     case 'send': {
-      const inputCoins = field(body, 'input_coins');
-      if (!Array.isArray(inputCoins) || inputCoins.length === 0) {
-        throw new Error('TransitionRequest: kind=send requires non-empty input_coins');
-      }
-      const outputs = field(body, 'output_templates');
-      if (!Array.isArray(outputs) || outputs.length === 0) {
-        throw new Error('TransitionRequest: kind=send requires non-empty output_templates');
-      }
-      assertOutputTemplateShapes(outputs, 'send');
       if (field(body, 'fold_coin_ids') !== undefined) {
         throw new Error('TransitionRequest: kind=send must not carry fold_coin_ids');
       }
       if (field(body, 'issuance') !== undefined) {
         throw new Error('TransitionRequest: kind=send must not carry issuance');
       }
-      break;
+      const input_coins = requireHex32Array(field(body, 'input_coins'), 'input_coins');
+      if (input_coins.length === 0) {
+        throw new Error('TransitionRequest: kind=send requires non-empty input_coins');
+      }
+      const outputsRaw = field(body, 'output_templates');
+      if (!Array.isArray(outputsRaw) || outputsRaw.length === 0) {
+        throw new Error('TransitionRequest: kind=send requires non-empty output_templates');
+      }
+      const output_templates = normalizeOutputTemplates(outputsRaw, 'send');
+      const out: TransitionRequestSend = {
+        kind: 'send',
+        subject,
+        next_pubkey,
+        npk_rand,
+        input_coins,
+        output_templates,
+      };
+      if (publisher_pubkey !== undefined) {
+        out.publisher_pubkey = publisher_pubkey;
+      }
+      return out;
     }
     case 'mint': {
-      const outputs = field(body, 'output_templates');
-      if (!Array.isArray(outputs) || outputs.length === 0) {
-        throw new Error('TransitionRequest: kind=mint requires non-empty output_templates');
-      }
-      assertOutputTemplateShapes(outputs, 'mint');
-      const issuance = field(body, 'issuance');
-      if (issuance === undefined || issuance === null) {
-        throw new Error('TransitionRequest: kind=mint requires issuance');
-      }
       if (field(body, 'input_coins') !== undefined) {
         throw new Error('TransitionRequest: kind=mint must not carry input_coins');
       }
       if (field(body, 'fold_coin_ids') !== undefined) {
         throw new Error('TransitionRequest: kind=mint must not carry fold_coin_ids');
       }
-      if (typeof issuance !== 'object') {
-        throw new Error('TransitionRequest: issuance must be an object');
+      const outputsRaw = field(body, 'output_templates');
+      if (!Array.isArray(outputsRaw) || outputsRaw.length === 0) {
+        throw new Error('TransitionRequest: kind=mint requires non-empty output_templates');
       }
-      const version = field(issuance, 'issuance_version');
-      if (version !== 1 && version !== 2) {
-        throw new Error('TransitionRequest: issuance_version must be 1 or 2');
+      const output_templates = normalizeOutputTemplates(outputsRaw, 'mint');
+      const issuanceRaw = field(body, 'issuance');
+      if (issuanceRaw === undefined || issuanceRaw === null) {
+        throw new Error('TransitionRequest: kind=mint requires issuance');
       }
-      if (version === 2) {
-        if (
-          field(issuance, 'cap_total') === undefined ||
-          field(issuance, 'terms_salt') === undefined
-        ) {
-          throw new Error(
-            'TransitionRequest: issuance_version=2 requires cap_total and terms_salt',
-          );
-        }
+      const issuance = normalizeIssuance(issuanceRaw);
+      const out: TransitionRequestMint = {
+        kind: 'mint',
+        subject,
+        next_pubkey,
+        npk_rand,
+        output_templates,
+        issuance,
+      };
+      if (publisher_pubkey !== undefined) {
+        out.publisher_pubkey = publisher_pubkey;
       }
-      break;
+      return out;
     }
     case 'receive': {
-      const fold = field(body, 'fold_coin_ids');
-      if (!Array.isArray(fold) || fold.length === 0) {
-        throw new Error('TransitionRequest: kind=receive requires non-empty fold_coin_ids');
-      }
       if (field(body, 'input_coins') !== undefined) {
         throw new Error('TransitionRequest: kind=receive must not carry input_coins');
       }
@@ -204,7 +200,21 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
       if (field(body, 'issuance') !== undefined) {
         throw new Error('TransitionRequest: kind=receive must not carry issuance');
       }
-      break;
+      const fold_coin_ids = requireHex32Array(field(body, 'fold_coin_ids'), 'fold_coin_ids');
+      if (fold_coin_ids.length === 0) {
+        throw new Error('TransitionRequest: kind=receive requires non-empty fold_coin_ids');
+      }
+      const out: TransitionRequestReceive = {
+        kind: 'receive',
+        subject,
+        next_pubkey,
+        npk_rand,
+        fold_coin_ids,
+      };
+      if (publisher_pubkey !== undefined) {
+        out.publisher_pubkey = publisher_pubkey;
+      }
+      return out;
     }
     default: {
       throw new Error(
@@ -215,76 +225,162 @@ export function assertTransitionRequest(body: unknown): asserts body is Transiti
 }
 
 /**
- * Validate each output template's required fields and, when present, the
- * closed `delivery` union (unknown `type` is an error). Crypto is not run
- * here.
- */
-function assertOutputTemplateShapes(outputs: unknown[], kind: string): void {
-  for (let i = 0; i < outputs.length; i++) {
-    const out = outputs[i];
-    if (typeof out !== 'object' || out === null || Array.isArray(out)) {
-      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}] must be an object`);
-    }
-    if (
-      typeof field(out, 'recipient') !== 'string' ||
-      (field(out, 'recipient') as string).length === 0
-    ) {
-      throw new Error(
-        `TransitionRequest: kind=${kind} output_templates[${i}].recipient is required`,
-      );
-    }
-    if (
-      typeof field(out, 'asset_id') !== 'string' ||
-      (field(out, 'asset_id') as string).length === 0
-    ) {
-      throw new Error(
-        `TransitionRequest: kind=${kind} output_templates[${i}].asset_id is required`,
-      );
-    }
-    if (typeof field(out, 'amount') !== 'string' || (field(out, 'amount') as string).length === 0) {
-      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}].amount is required`);
-    }
-    const delivery = field(out, 'delivery');
-    if (delivery !== undefined) {
-      // Unknown type / wrong shape → DeliveryCredentialError (loud).
-      parseDeliveryCredential(delivery);
-    }
-  }
-}
-
-/**
  * JSON body for `POST /v1/tx` — only defined fields, no `fee_address`, no
  * undefined-valued keys (so the server never sees `"fee_address": null`).
  */
 export function transitionRequestToJson(body: TransitionRequest): Record<string, unknown> {
-  assertTransitionRequest(body);
+  const req = assertTransitionRequest(body);
   const out: Record<string, unknown> = {
-    kind: body.kind,
-    subject: body.subject,
-    next_pubkey: body.next_pubkey,
-    npk_rand: body.npk_rand,
+    kind: req.kind,
+    subject: req.subject,
+    next_pubkey: req.next_pubkey,
+    npk_rand: req.npk_rand,
   };
-  if (body.publisher_pubkey !== undefined) {
-    out.publisher_pubkey = body.publisher_pubkey;
+  if (req.publisher_pubkey !== undefined) {
+    out.publisher_pubkey = req.publisher_pubkey;
   }
-  switch (body.kind) {
+  switch (req.kind) {
     case 'send':
-      out.input_coins = body.input_coins;
-      out.output_templates = body.output_templates.map(outputTemplateToJson);
+      out.input_coins = req.input_coins;
+      out.output_templates = req.output_templates.map(outputTemplateToJson);
       break;
     case 'mint':
-      out.output_templates = body.output_templates.map(outputTemplateToJson);
-      out.issuance = body.issuance;
+      out.output_templates = req.output_templates.map(outputTemplateToJson);
+      out.issuance = req.issuance;
       break;
     case 'receive':
-      out.fold_coin_ids = body.fold_coin_ids;
+      out.fold_coin_ids = req.fold_coin_ids;
       break;
-    default: {
-      const _exhaustive: never = body;
-      throw new Error(`unreachable kind ${JSON.stringify(_exhaustive)}`);
-    }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Internals
+// ---------------------------------------------------------------------------
+
+function field(obj: object, key: string): unknown {
+  return Reflect.get(obj, key);
+}
+
+function requireNonEmptyString(obj: object, key: string): string {
+  const v = field(obj, key);
+  if (typeof v !== 'string' || v.length === 0) {
+    throw new Error(`TransitionRequest: ${key} is required`);
+  }
+  return v;
+}
+
+function requireHex32(obj: object, key: string): string {
+  const v = field(obj, key);
+  if (typeof v !== 'string' || v.length === 0) {
+    throw new Error(`TransitionRequest: ${key} is required`);
+  }
+  decodeHexExact(v, 32, `TransitionRequest.${key}`);
+  return v;
+}
+
+function requireHex32Array(raw: unknown, fieldName: string): string[] {
+  if (!Array.isArray(raw)) {
+    throw new Error(`TransitionRequest: ${fieldName} must be an array`);
+  }
+  return raw.map((entry, i) => {
+    if (typeof entry !== 'string') {
+      throw new Error(`TransitionRequest: ${fieldName}[${i}] must be a 32-byte hex string`);
+    }
+    decodeHexExact(entry, 32, `TransitionRequest.${fieldName}[${i}]`);
+    return entry;
+  });
+}
+
+function normalizeOutputTemplates(outputs: unknown[], kind: string): OutputTemplate[] {
+  return outputs.map((out, i) => {
+    if (typeof out !== 'object' || out === null || Array.isArray(out)) {
+      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}] must be an object`);
+    }
+    const recipient = field(out, 'recipient');
+    if (typeof recipient !== 'string' || recipient.length === 0) {
+      throw new Error(
+        `TransitionRequest: kind=${kind} output_templates[${i}].recipient is required`,
+      );
+    }
+    const assetId = field(out, 'asset_id');
+    if (typeof assetId !== 'string' || assetId.length === 0) {
+      throw new Error(
+        `TransitionRequest: kind=${kind} output_templates[${i}].asset_id is required`,
+      );
+    }
+    decodeHexExact(assetId, 32, `TransitionRequest.output_templates[${i}].asset_id`);
+    const amount = field(out, 'amount');
+    if (typeof amount !== 'string' || amount.length === 0) {
+      throw new Error(`TransitionRequest: kind=${kind} output_templates[${i}].amount is required`);
+    }
+    parseU128Decimal(amount, `TransitionRequest.output_templates[${i}].amount`);
+    const template: OutputTemplate = {
+      recipient,
+      asset_id: assetId,
+      amount,
+    };
+    const delivery = field(out, 'delivery');
+    if (delivery !== undefined) {
+      // Unknown type / wrong shape → DeliveryCredentialError (loud).
+      template.delivery = parseDeliveryCredential(delivery);
+    }
+    return template;
+  });
+}
+
+function normalizeIssuance(raw: unknown): Issuance {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('TransitionRequest: issuance must be an object');
+  }
+  const name = field(raw, 'name');
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new Error('TransitionRequest: issuance.name is required');
+  }
+  const decimals = field(raw, 'decimals');
+  if (typeof decimals !== 'number' || !Number.isInteger(decimals) || decimals < 0) {
+    throw new Error('TransitionRequest: issuance.decimals must be a non-negative integer');
+  }
+  const amount = field(raw, 'amount');
+  if (typeof amount !== 'string' || amount.length === 0) {
+    throw new Error('TransitionRequest: issuance.amount is required');
+  }
+  parseU128Decimal(amount, 'TransitionRequest.issuance.amount');
+  const version = field(raw, 'issuance_version');
+  if (version !== 1 && version !== 2) {
+    throw new Error('TransitionRequest: issuance_version must be 1 or 2');
+  }
+  if (version === 2) {
+    const cap_total = field(raw, 'cap_total');
+    if (typeof cap_total !== 'string' || cap_total.length === 0) {
+      throw new Error('TransitionRequest: issuance_version=2 requires cap_total and terms_salt');
+    }
+    parseU128Decimal(cap_total, 'TransitionRequest.issuance.cap_total');
+    const terms_salt = field(raw, 'terms_salt');
+    if (typeof terms_salt !== 'string' || terms_salt.length === 0) {
+      throw new Error('TransitionRequest: issuance_version=2 requires cap_total and terms_salt');
+    }
+    decodeHexExact(terms_salt, 32, 'TransitionRequest.issuance.terms_salt');
+    return {
+      name,
+      decimals,
+      issuance_version: 2,
+      amount,
+      cap_total,
+      terms_salt,
+    };
+  }
+  // v1 — V2-only fields are explicitly forbidden (API json_to_issuance).
+  if (field(raw, 'cap_total') !== undefined || field(raw, 'terms_salt') !== undefined) {
+    throw new Error('TransitionRequest: issuance_version=1 must not carry cap_total or terms_salt');
+  }
+  return {
+    name,
+    decimals,
+    issuance_version: 1,
+    amount,
+  };
 }
 
 /**

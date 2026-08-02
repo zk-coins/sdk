@@ -210,6 +210,25 @@ describe('v1 keys — bounds and mnemonic gates', () => {
     expect(() => seedFromMnemonicV1('   ')).toThrow(/mnemonic is required/);
   });
 
+  it('seedFromMnemonicV1 refuses invalid BIP-39 (wordlist / count / checksum)', () => {
+    // Without validateMnemonic these would silently produce a non-recoverable seed.
+    expect(() =>
+      seedFromMnemonicV1(
+        'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon notaword',
+      ),
+    ).toThrow(/invalid BIP-39 mnemonic/);
+    expect(() => seedFromMnemonicV1('abandon abandon abandon')).toThrow(/invalid BIP-39 mnemonic/);
+    // Valid words + valid length but broken checksum (last word wrong for abandon×11).
+    expect(() =>
+      seedFromMnemonicV1(
+        'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon',
+      ),
+    ).toThrow(/invalid BIP-39 mnemonic/);
+    // Positive control: the V.2-ext mnemonic still derives.
+    expect(seedFromMnemonicV1(MNEMONIC)).toBeInstanceOf(Uint8Array);
+    expect(seedFromMnemonicV1(MNEMONIC).length).toBe(64);
+  });
+
   it('xOnlyPubkeyFromSecret matches BIP-340 normalisation', () => {
     const pk = xOnlyPubkeyFromSecret(V8_SK1);
     expect(encodeHexLower(pk)).toBe(encodeHexLower(bip340NormaliseSecret(V8_SK1).pkBytes));
@@ -465,31 +484,102 @@ describe('TransitionRequest presence matrix (full)', () => {
     expect(j3).not.toHaveProperty('output_templates');
   });
 
-  it('transitionRequestToJson exhaustive default fires if kind mutates after assert', () => {
-    // Defensive `never` branch: assert saw kind=send; the later switch sees a
-    // different value because a Proxy lies on subsequent reads.
-    const legal: TransitionRequest = {
+  it('rejects non-hex coin ids, incomplete issuance, and v1 carrying v2 fields', () => {
+    // Numeric input_coins slipped through when only Array.isArray was checked.
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: [1],
+        output_templates: oneOut,
+      }),
+    ).toThrow(/input_coins\[0\] must be a 32-byte hex string/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['not-hex'],
+        output_templates: oneOut,
+      }),
+    ).toThrow(/input_coins\[0\]/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'receive',
+        ...base,
+        fold_coin_ids: [42],
+      }),
+    ).toThrow(/fold_coin_ids\[0\] must be a 32-byte hex string/);
+
+    // Issuance name/decimals/amount were unchecked.
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: { decimals: 0, issuance_version: 1, amount: '1' },
+      }),
+    ).toThrow(/issuance\.name is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: { name: 'x', decimals: 1.5, issuance_version: 1, amount: '1' },
+      }),
+    ).toThrow(/issuance\.decimals must be a non-negative integer/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '01' },
+      }),
+    ).toThrow(/issuance\.amount/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          cap_total: '100',
+        },
+      }),
+    ).toThrow(/issuance_version=1 must not carry cap_total or terms_salt/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          terms_salt: 'ff'.repeat(32),
+        },
+      }),
+    ).toThrow(/issuance_version=1 must not carry cap_total or terms_salt/);
+
+    // Normalised return drops undefined publisher and re-validates hex.
+    const normalised = assertTransitionRequest({
       kind: 'send',
       ...base,
       input_coins: ['cc'.repeat(32)],
       output_templates: oneOut,
-    };
-    let kindReads = 0;
-    const sneaky: TransitionRequest = new Proxy(legal, {
-      get(target, prop, _receiver): unknown {
-        if (prop === 'kind') {
-          kindReads += 1;
-          // assertTransitionRequest: 1 read; out.kind = body.kind: 2nd; switch: 3rd
-          if (kindReads <= 2) return 'send';
-          return 'ghost';
-        }
-        if (typeof prop !== 'string' || !(prop in target)) {
-          return undefined;
-        }
-        return target[prop as keyof TransitionRequest];
-      },
     });
-    expect(() => transitionRequestToJson(sneaky)).toThrow(/unreachable kind/);
+    expect(normalised).toEqual({
+      kind: 'send',
+      subject: base.subject,
+      next_pubkey: base.next_pubkey,
+      npk_rand: base.npk_rand,
+      input_coins: ['cc'.repeat(32)],
+      output_templates: oneOut,
+    });
+    expect(normalised).not.toHaveProperty('publisher_pubkey');
   });
 });
 

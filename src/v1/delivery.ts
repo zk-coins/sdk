@@ -739,13 +739,13 @@ function verifyProfileAgainstOutput(
   const nkHex = requireStringField(zkRaw, 'nk_commit');
   const ivpkHex = requireStringField(zkRaw, 'ivpk');
   const addrSigHex = requireStringField(zkRaw, 'addr_sig');
-  // name_sig is required in the object shape for served accounts; we only
-  // require the field present as hex — payment does not depend on it when
-  // the consumer did not arrive via a name.
-  const nameSigHex = zkRaw.name_sig;
-  if (typeof nameSigHex === 'string') {
-    decodeHexExact(nameSigHex, 64, 'zkcoins.name_sig');
-  }
+  // Closed profile object always carries name_sig as 64-byte hex (Rust
+  // parse_zkcoins_object). BIP-340 verification of name_sig is check 5 and
+  // only runs when the consumer arrived via a resolved name — this path is
+  // payment-by-profile (address/op), so presence + form are required, not
+  // the name-message signature check.
+  const nameSigHex = requireStringField(zkRaw, 'name_sig');
+  decodeHexExact(nameSigHex, 64, 'zkcoins.name_sig');
   const relaysRaw = zkRaw.relays;
   if (!Array.isArray(relaysRaw) || relaysRaw.length === 0) {
     throw new DeliveryCredentialError('relays', 'zkcoins.relays must be a non-empty array');

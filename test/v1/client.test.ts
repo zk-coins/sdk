@@ -523,12 +523,24 @@ describe('v1 transition flow (msw)', () => {
   });
 
   it('SSE yields status (not phase) and ignores diagnostic phase labels', async () => {
+    const completeResult = {
+      new_account_state_hash: '11'.repeat(32),
+      output_coins_root: '22'.repeat(32),
+      input_nullifiers_root: '33'.repeat(32),
+      output_coin_ids: [] as string[],
+    };
     const frames =
       'event: phase\ndata: {"status":"proving","phase":"witness_build","progress":0.2}\n\n' +
       'event: phase\ndata: {"status":"awaiting_signature","phase":"ready_for_wallet","progress":0.5,"awaiting_signature":' +
       JSON.stringify(awaiting) +
       '}\n\n' +
-      'event: complete\ndata: {"job_id":"job-s","kind":"send","status":"completed","progress":1,"result":{"output_coin_ids":[]}}\n\n';
+      `event: complete\ndata: ${JSON.stringify({
+        job_id: 'job-s',
+        kind: 'send',
+        status: 'completed',
+        progress: 1,
+        result: completeResult,
+      })}\n\n`;
 
     server.use(
       http.get(`${BASE}/v1/jobs/job-s/stream`, () => {
@@ -994,7 +1006,12 @@ describe('ZkCoinsV1Client request surface', () => {
           kind: 'send',
           status: 'completed',
           progress: 1,
-          result: { output_coin_ids: [1] },
+          result: {
+            new_account_state_hash: '11'.repeat(32),
+            output_coins_root: '22'.repeat(32),
+            input_nullifiers_root: '33'.repeat(32),
+            output_coin_ids: [1],
+          },
         }),
       ),
     );
@@ -1303,7 +1320,13 @@ describe('ZkCoinsV1Client request surface', () => {
     const frames =
       'event: phase\n' +
       'data: {"status":"completed","job_id":"m","kind":"send","progress":1,\n' +
-      'data: "result":{"output_coin_ids":[]}}\n\n';
+      'data: "result":{"new_account_state_hash":"' +
+      '11'.repeat(32) +
+      '","output_coins_root":"' +
+      '22'.repeat(32) +
+      '","input_nullifiers_root":"' +
+      '33'.repeat(32) +
+      '","output_coin_ids":[]}}\n\n';
     server.use(
       http.get(
         `${BASE}/v1/jobs/m/stream`,
@@ -1661,6 +1684,152 @@ describe('ZkCoinsV1Client request surface', () => {
     }
     expect(seen).toEqual(['completed']);
     expect(lastJob).toMatchObject({
+      status: 'completed',
+      result: {
+        new_account_state_hash: ash,
+        output_coins_root: ocr,
+        input_nullifiers_root: inr,
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    });
+  });
+
+  it('completed mint/send/receive without a required digest fails closed (per kind)', async () => {
+    // Without kind-strict digests a completed send with only output_coin_ids
+    // would parse as success — the wallet would treat a half-result as final.
+    const ash = '11'.repeat(32);
+    const ocr = '22'.repeat(32);
+    const inr = '33'.repeat(32);
+    const coins = ['aa'.repeat(32)];
+
+    const cases: Array<{
+      id: string;
+      kind: 'mint' | 'send' | 'receive';
+      result: Record<string, unknown>;
+      message: RegExp;
+    }> = [
+      {
+        id: 'digest-send-missing-ash',
+        kind: 'send',
+        result: {
+          output_coins_root: ocr,
+          input_nullifiers_root: inr,
+          output_coin_ids: coins,
+        },
+        message: /new_account_state_hash: required 32-byte hex for completed kind=send/,
+      },
+      {
+        id: 'digest-mint-missing-ocr',
+        kind: 'mint',
+        result: {
+          new_account_state_hash: ash,
+          input_nullifiers_root: inr,
+          output_coin_ids: coins,
+        },
+        message: /output_coins_root: required 32-byte hex for completed kind=mint/,
+      },
+      {
+        id: 'digest-recv-missing-inr',
+        kind: 'receive',
+        result: {
+          new_account_state_hash: ash,
+          output_coins_root: ocr,
+          output_coin_ids: coins,
+        },
+        message: /input_nullifiers_root: required 32-byte hex for completed kind=receive/,
+      },
+    ];
+
+    for (const c of cases) {
+      server.use(
+        http.get(`${BASE}/v1/jobs/${c.id}`, () =>
+          HttpResponse.json({
+            job_id: c.id,
+            kind: c.kind,
+            status: 'completed',
+            progress: 1,
+            result: c.result,
+          }),
+        ),
+      );
+      await expect(newClient().getJob(c.id)).rejects.toThrow(c.message);
+    }
+
+    // attest_balance still accepts omitted digests (documented exception).
+    server.use(
+      http.get(`${BASE}/v1/jobs/digest-attest-ok`, () =>
+        HttpResponse.json({
+          job_id: 'digest-attest-ok',
+          kind: 'attest_balance',
+          status: 'completed',
+          progress: 1,
+          result: { output_coin_ids: [], attestation: 'ff'.repeat(16) },
+        }),
+      ),
+    );
+    const { job } = await newClient().getJob('digest-attest-ok');
+    expect(job.kind).toBe('attest_balance');
+    expect(job.result?.attestation).toBe('ff'.repeat(16));
+    expect(job.result?.new_account_state_hash).toBeUndefined();
+
+    // When attest_balance does carry digests, they are form-checked and kept.
+    server.use(
+      http.get(`${BASE}/v1/jobs/digest-attest-with`, () =>
+        HttpResponse.json({
+          job_id: 'digest-attest-with',
+          kind: 'attest_balance',
+          status: 'completed',
+          progress: 1,
+          result: {
+            new_account_state_hash: ash,
+            output_coins_root: ocr,
+            input_nullifiers_root: inr,
+            output_coin_ids: [],
+            attestation: 'ee'.repeat(8),
+          },
+        }),
+      ),
+    );
+    const withDigests = await newClient().getJob('digest-attest-with');
+    expect(withDigests.job.result?.new_account_state_hash).toBe(ash);
+    expect(withDigests.job.result?.output_coins_root).toBe(ocr);
+    expect(withDigests.job.result?.input_nullifiers_root).toBe(inr);
+  });
+
+  it('SSE frames delimited by CRLF are processed (not only LF)', async () => {
+    // Without CRLF support a standard-conformant `\r\n\r\n` stream never yields.
+    const body = {
+      job_id: 'sse-crlf',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const frames = 'event: complete\r\n' + `data: ${JSON.stringify(body)}\r\n` + '\r\n';
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-crlf/stream`,
+        () =>
+          new HttpResponse(frames, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    let last: unknown;
+    for await (const frame of newClient().streamJob('sse-crlf')) {
+      seen.push(frame.status);
+      last = frame.job;
+    }
+    expect(seen).toEqual(['completed']);
+    expect(last).toMatchObject({
+      job_id: 'sse-crlf',
       status: 'completed',
       result: { output_coin_ids: ['aa'.repeat(32)] },
     });
