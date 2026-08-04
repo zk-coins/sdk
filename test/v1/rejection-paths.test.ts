@@ -343,7 +343,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         ...base,
         input_coins: ['cc'.repeat(32)],
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/must not carry issuance/);
   });
@@ -354,7 +360,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: [],
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/non-empty output_templates/);
     expect(() =>
@@ -371,7 +383,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         ...base,
         output_templates: oneOut,
         input_coins: ['cc'.repeat(32)],
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/must not carry input_coins/);
     expect(() =>
@@ -380,7 +398,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         ...base,
         output_templates: oneOut,
         fold_coin_ids: ['ee'.repeat(32)],
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/must not carry fold_coin_ids/);
     expect(() =>
@@ -396,7 +420,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 0, issuance_version: 3, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 3,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance_version must be 1 or 2/);
     expect(() =>
@@ -404,7 +434,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 0, issuance_version: 2, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 2,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance_version=2 requires cap_total and terms_salt/);
   });
@@ -438,7 +474,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'receive',
         ...base,
         fold_coin_ids: ['ee'.repeat(32)],
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/must not carry issuance/);
   });
@@ -448,7 +490,13 @@ describe('TransitionRequest presence matrix (full)', () => {
       kind: 'mint',
       ...base,
       output_templates: oneOut,
-      issuance: { name: 'zkUSD', decimals: 8, issuance_version: 1, amount: '1000' },
+      issuance: {
+        name: 'zkUSD',
+        decimals: 8,
+        issuance_version: 1,
+        amount: '1000',
+        creator_pubkey: 'aa'.repeat(32),
+      },
     };
     const j1 = transitionRequestToJson(mintV1);
     expect(j1.kind).toBe('mint');
@@ -468,6 +516,7 @@ describe('TransitionRequest presence matrix (full)', () => {
         amount: '1000',
         cap_total: '1000000',
         terms_salt: 'ff'.repeat(32),
+        creator_pubkey: 'aa'.repeat(32),
       },
     };
     const j2 = transitionRequestToJson(mintV2);
@@ -516,7 +565,12 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { decimals: 0, issuance_version: 1, amount: '1' },
+        issuance: {
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance\.name is required/);
     expect(() =>
@@ -524,7 +578,26 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 1.5, issuance_version: 1, amount: '1' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+        },
+      }),
+    ).toThrow(/issuance\.creator_pubkey is required/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        issuance: {
+          name: 'x',
+          decimals: 1.5,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance\.decimals must be a non-negative integer/);
     expect(() =>
@@ -532,7 +605,13 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 0, issuance_version: 1, amount: '01' },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '01',
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance\.amount/);
     expect(() =>
@@ -545,6 +624,7 @@ describe('TransitionRequest presence matrix (full)', () => {
           decimals: 0,
           issuance_version: 1,
           amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
           cap_total: '100',
         },
       }),
@@ -559,6 +639,7 @@ describe('TransitionRequest presence matrix (full)', () => {
           decimals: 0,
           issuance_version: 1,
           amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
           terms_salt: 'ff'.repeat(32),
         },
       }),
@@ -677,7 +758,12 @@ describe('TransitionRequest presence matrix (full)', () => {
         kind: 'mint',
         ...base,
         output_templates: oneOut,
-        issuance: { name: 'x', decimals: 0, issuance_version: 1 },
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          creator_pubkey: 'aa'.repeat(32),
+        },
       }),
     ).toThrow(/issuance\.amount is required/);
     expect(() =>
@@ -690,6 +776,7 @@ describe('TransitionRequest presence matrix (full)', () => {
           decimals: 0,
           issuance_version: 2,
           amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
           cap_total: '100',
         },
       }),
@@ -705,6 +792,7 @@ describe('TransitionRequest presence matrix (full)', () => {
           decimals: 0,
           issuance_version: 2,
           amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
           cap_total: '100',
           terms_salt: '',
         },

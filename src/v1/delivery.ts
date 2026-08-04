@@ -18,10 +18,12 @@
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-import { decodeZkAddress } from './bech32m.js';
+import { signSchnorr } from '../signing.js';
+import { decodeZkAddress, encodeZkAddress } from './bech32m.js';
 import { bytesEqual, decodeHexExact, encodeHexLower } from './hex.js';
 import type { Network } from './mstate.js';
 import { verifyNip01Event, type NostrEventJson } from './nostrEvent.js';
+import { bip340NormaliseSecret } from './transitionSignature.js';
 
 // ---------------------------------------------------------------------------
 // Wire types (§7.5 closed tagged union)
@@ -357,6 +359,101 @@ export function profileInvoiceMessage(input: {
     opPubkey: input.opPubkey,
     relays: input.relays,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Invoice issuance (wallet-side counterparty object)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parameters for {@link issueInvoice}. Secrets are raw 32-byte scalars;
+ * public fields are already-derived 32-byte values. Signing uses the raw
+ * secrets (BIP-340 even-y negation is performed inside the signer); public
+ * keys on the wire are derived separately via {@link bip340NormaliseSecret}.
+ */
+export interface IssueInvoiceParams {
+  /** Decimal-string u128 amount — canonical form validated via parseU128Decimal. */
+  amount: string;
+  /** 32-byte lowercase-hex asset id. */
+  assetId: string;
+  /** Optional memo (UTF-8). Omit entirely for none — do not pass ''. */
+  memo?: string;
+  /** Non-empty relay set; every entry must start with ws:// or wss://. */
+  relays: string[];
+  /**
+   * 32-byte RAW secret scalar of the invoice's own address holder (the
+   * recipient's sk0). Signs addr_sig. Pass the raw secret as-is — do NOT
+   * pre-normalise via bip340NormaliseSecret before signing; @noble/curves'
+   * schnorr.sign already performs the BIP-340 even-y negation internally,
+   * so signing with the raw scalar produces the correct signature under
+   * the even-y public key this function derives separately for the wire
+   * fields.
+   */
+  sk0Secret: Uint8Array;
+  /** 32-byte recipient nk_commit (public). */
+  nkCommit: Uint8Array;
+  /** 32-byte recipient IVPK (public), i.e. bip340NormaliseSecret(ivk).pkBytes. */
+  ivpk: Uint8Array;
+  /** 32-byte RAW secret scalar of the recipient's op identity. Signs sig. */
+  opSecret: Uint8Array;
+}
+
+/**
+ * Issue a fully signed §4.3 / §7.5 `Invoice` for placement as
+ * `output_templates[i].delivery = { type: 'invoice', invoice }`.
+ *
+ * Mirrors `verifyInvoiceAgainstOutput` / Rust `verify_invoice` so a
+ * round-trip through {@link verifyDeliveryCredential} succeeds when the
+ * enclosing output matches (recipient / asset_id / amount).
+ */
+export async function issueInvoice(params: IssueInvoiceParams): Promise<InvoiceJson> {
+  if (params.relays.length === 0) {
+    throw new DeliveryCredentialError('relays', 'issueInvoice: relays must be non-empty');
+  }
+  for (const url of params.relays) {
+    validateRelayUrl(url);
+  }
+
+  const amount = parseU128Decimal(params.amount, 'amount');
+  const assetId = decodeHexExact(params.assetId, 32, 'asset_id');
+  require32(params.nkCommit, 'nk_commit');
+  require32(params.ivpk, 'ivpk');
+
+  const { pkBytes: pk0 } = bip340NormaliseSecret(params.sk0Secret);
+  const { pkBytes: opPubkey } = bip340NormaliseSecret(params.opSecret);
+
+  const recipientRaw = addressFromParts(pk0, params.nkCommit);
+  const recipient = encodeZkAddress(recipientRaw);
+
+  const msg = invoiceMessage({
+    amount,
+    recipient: recipientRaw,
+    pk0,
+    nkCommit: params.nkCommit,
+    assetId,
+    ...(params.memo !== undefined ? { memo: params.memo } : {}),
+    ivpk: params.ivpk,
+    opPubkey,
+    relays: params.relays,
+  });
+
+  const addrSigHex = await signSchnorr(encodeHexLower(params.sk0Secret), encodeHexLower(msg));
+  const sigHex = await signSchnorr(encodeHexLower(params.opSecret), encodeHexLower(msg));
+
+  const out: InvoiceJson = {
+    amount: params.amount,
+    recipient,
+    asset_id: params.assetId,
+    pk0: encodeHexLower(pk0),
+    nk_commit: encodeHexLower(params.nkCommit),
+    ivpk: encodeHexLower(params.ivpk),
+    op_pubkey: encodeHexLower(opPubkey),
+    relays: params.relays.slice(),
+    addr_sig: addrSigHex,
+    sig: sigHex,
+  };
+  if (params.memo !== undefined) out.memo = params.memo;
+  return out;
 }
 
 // ---------------------------------------------------------------------------

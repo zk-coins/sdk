@@ -23,6 +23,7 @@ import {
   encodeZkAddress,
   escapeNip01String,
   invoiceMessage,
+  issueInvoice,
   parseDeliveryCredential,
   parseU128Decimal,
   PaymentIdentityPinMismatchError,
@@ -591,7 +592,13 @@ describe('TransitionRequest delivery placement', () => {
       subject: SELF_SUBJECT,
       next_pubkey: 'aa'.repeat(32),
       npk_rand: 'bb'.repeat(32),
-      issuance: { name: 'X', decimals: 0, issuance_version: 1, amount: AMOUNT },
+      issuance: {
+        name: 'X',
+        decimals: 0,
+        issuance_version: 1,
+        amount: AMOUNT,
+        creator_pubkey: PK0_HEX,
+      },
       output_templates: [
         {
           recipient: address,
@@ -1378,5 +1385,82 @@ describe('parseU128Decimal bounds', () => {
     // Canonical decimal longer than u128 max (2^128 − 1 ≈ 39 digits).
     const over = '1' + '0'.repeat(40);
     expect(() => parseU128Decimal(over, 'field')).toThrow(/out of u128 range/);
+  });
+});
+
+describe('issueInvoice', () => {
+  const baseParams = () => ({
+    amount: AMOUNT,
+    assetId: ASSET_ID,
+    relays: [RELAY],
+    sk0Secret: hex32(SK0_HEX),
+    nkCommit: v2extNkCommit(),
+    ivpk: hex32(IVPK_HEX),
+    opSecret: hex32(OP_SECRET_HEX),
+  });
+
+  it('issues a valid invoice that round-trips through verifyDeliveryCredential', async () => {
+    const invoice = await issueInvoice(baseParams());
+    expect(invoice.pk0).toBe(PK0_HEX);
+    expect(invoice.op_pubkey).toBe(OP_PUBKEY_HEX);
+    expect(invoice.amount).toBe(AMOUNT);
+    expect(invoice.asset_id).toBe(ASSET_ID);
+    expect(invoice.relays).toEqual([RELAY]);
+    expect(invoice.memo).toBeUndefined();
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        {
+          recipient: invoice.recipient,
+          asset_id: invoice.asset_id,
+          amount: invoice.amount,
+        },
+        { network: 'regtest' },
+      ),
+    ).not.toThrow();
+  });
+
+  it('includes memo on the wire and changes both signatures vs no-memo', async () => {
+    const noMemo = await issueInvoice(baseParams());
+    const withMemo = await issueInvoice({ ...baseParams(), memo: 'payment for goods' });
+    expect(withMemo.memo).toBe('payment for goods');
+    expect(withMemo.addr_sig).not.toBe(noMemo.addr_sig);
+    expect(withMemo.sig).not.toBe(noMemo.sig);
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice: withMemo },
+        {
+          recipient: withMemo.recipient,
+          asset_id: withMemo.asset_id,
+          amount: withMemo.amount,
+        },
+        { network: 'regtest' },
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects empty relays', async () => {
+    await expect(issueInvoice({ ...baseParams(), relays: [] })).rejects.toThrow(
+      DeliveryCredentialError,
+    );
+    await expect(issueInvoice({ ...baseParams(), relays: [] })).rejects.toThrow(/relays/);
+  });
+
+  it('rejects a non-ws(s) relay URL', async () => {
+    await expect(
+      issueInvoice({ ...baseParams(), relays: ['https://not-a-relay.example'] }),
+    ).rejects.toThrow(DeliveryCredentialError);
+    await expect(
+      issueInvoice({ ...baseParams(), relays: ['https://not-a-relay.example'] }),
+    ).rejects.toThrow(/ws:\/\/|wss:\/\//);
+  });
+
+  it('rejects wrong-length nkCommit / ivpk', async () => {
+    await expect(
+      issueInvoice({ ...baseParams(), nkCommit: new Uint8Array(31) }),
+    ).rejects.toThrow(/nk_commit/);
+    await expect(issueInvoice({ ...baseParams(), ivpk: new Uint8Array(16) })).rejects.toThrow(
+      /ivpk/,
+    );
   });
 });

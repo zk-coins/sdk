@@ -40,6 +40,8 @@ export type IssuanceV1 = {
   decimals: number;
   issuance_version: 1;
   amount: string;
+  /** Genesis spend key Pk₀ — 32-byte lowercase hex. */
+  creator_pubkey: string;
   cap_total?: never;
   terms_salt?: never;
 };
@@ -51,6 +53,8 @@ export type IssuanceV2 = {
   amount: string;
   cap_total: string;
   terms_salt: string;
+  /** Genesis spend key Pk₀ — 32-byte lowercase hex. */
+  creator_pubkey: string;
 };
 
 export type Issuance = IssuanceV1 | IssuanceV2;
@@ -347,6 +351,11 @@ function normalizeIssuance(raw: unknown): Issuance {
     throw new Error('TransitionRequest: issuance.amount is required');
   }
   parseU128Decimal(amount, 'TransitionRequest.issuance.amount');
+  const creator_pubkey = field(raw, 'creator_pubkey');
+  if (typeof creator_pubkey !== 'string' || creator_pubkey.length === 0) {
+    throw new Error('TransitionRequest: issuance.creator_pubkey is required');
+  }
+  decodeHexExact(creator_pubkey, 32, 'TransitionRequest.issuance.creator_pubkey');
   const version = field(raw, 'issuance_version');
   if (version !== 1 && version !== 2) {
     throw new Error('TransitionRequest: issuance_version must be 1 or 2');
@@ -369,6 +378,7 @@ function normalizeIssuance(raw: unknown): Issuance {
       amount,
       cap_total,
       terms_salt,
+      creator_pubkey,
     };
   }
   // v1 — V2-only fields are explicitly forbidden (API json_to_issuance).
@@ -380,6 +390,7 @@ function normalizeIssuance(raw: unknown): Issuance {
     decimals,
     issuance_version: 1,
     amount,
+    creator_pubkey,
   };
 }
 
