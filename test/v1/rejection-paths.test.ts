@@ -485,6 +485,62 @@ describe('TransitionRequest presence matrix (full)', () => {
     ).toThrow(/must not carry issuance/);
   });
 
+  it('mint/send: reject genesis_pubkey; receive accepts and round-trips it', () => {
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'mint',
+        ...base,
+        output_templates: oneOut,
+        genesis_pubkey: 'd0'.repeat(32),
+        issuance: {
+          name: 'x',
+          decimals: 0,
+          issuance_version: 1,
+          amount: '1',
+          creator_pubkey: 'aa'.repeat(32),
+        },
+      }),
+    ).toThrow(/must not carry genesis_pubkey/);
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'send',
+        ...base,
+        input_coins: ['cc'.repeat(32)],
+        output_templates: oneOut,
+        genesis_pubkey: 'd0'.repeat(32),
+      }),
+    ).toThrow(/must not carry genesis_pubkey/);
+
+    const withGenesis: TransitionRequest = assertTransitionRequest({
+      kind: 'receive',
+      ...base,
+      fold_coin_ids: ['ee'.repeat(32)],
+      genesis_pubkey: 'd0'.repeat(32),
+    });
+    expect(withGenesis.kind).toBe('receive');
+    if (withGenesis.kind !== 'receive') throw new Error('expected receive');
+    expect(withGenesis.genesis_pubkey).toBe('d0'.repeat(32));
+    const jsonWith = transitionRequestToJson(withGenesis);
+    expect(jsonWith.genesis_pubkey).toBe('d0'.repeat(32));
+
+    const withoutGenesis: TransitionRequest = assertTransitionRequest({
+      kind: 'receive',
+      ...base,
+      fold_coin_ids: ['ee'.repeat(32)],
+    });
+    const jsonWithout = transitionRequestToJson(withoutGenesis);
+    expect(jsonWithout).not.toHaveProperty('genesis_pubkey');
+
+    expect(() =>
+      assertTransitionRequest({
+        kind: 'receive',
+        ...base,
+        fold_coin_ids: ['ee'.repeat(32)],
+        genesis_pubkey: 'd0'.repeat(16),
+      }),
+    ).toThrow(/genesis_pubkey/);
+  });
+
   it('serialises legal mint (v1 + v2) and receive, including publisher', () => {
     const mintV1: TransitionRequest = {
       kind: 'mint',

@@ -93,6 +93,12 @@ export type TransitionRequestMint = TransitionBase & {
 export type TransitionRequestReceive = TransitionBase & {
   kind: 'receive';
   fold_coin_ids: string[];
+  /**
+   * Recipient's genesis Pk₀ — 32-byte lowercase hex. REQUIRED for a genesis
+   * receive (the account's first transition); MUST be absent otherwise
+   * (§7.5). Symmetric to `Issuance.creator_pubkey`.
+   */
+  genesis_pubkey?: string;
   input_coins?: never;
   output_templates?: never;
   issuance?: never;
@@ -142,6 +148,9 @@ export function assertTransitionRequest(body: unknown): TransitionRequest {
       if (field(body, 'issuance') !== undefined) {
         throw new Error('TransitionRequest: kind=send must not carry issuance');
       }
+      if (field(body, 'genesis_pubkey') !== undefined) {
+        throw new Error('TransitionRequest: kind=send must not carry genesis_pubkey');
+      }
       const input_coins = requireHex32Array(field(body, 'input_coins'), 'input_coins');
       if (input_coins.length === 0) {
         throw new Error('TransitionRequest: kind=send requires non-empty input_coins');
@@ -170,6 +179,9 @@ export function assertTransitionRequest(body: unknown): TransitionRequest {
       }
       if (field(body, 'fold_coin_ids') !== undefined) {
         throw new Error('TransitionRequest: kind=mint must not carry fold_coin_ids');
+      }
+      if (field(body, 'genesis_pubkey') !== undefined) {
+        throw new Error('TransitionRequest: kind=mint must not carry genesis_pubkey');
       }
       const outputsRaw = field(body, 'output_templates');
       if (!Array.isArray(outputsRaw) || outputsRaw.length === 0) {
@@ -208,6 +220,10 @@ export function assertTransitionRequest(body: unknown): TransitionRequest {
       if (fold_coin_ids.length === 0) {
         throw new Error('TransitionRequest: kind=receive requires non-empty fold_coin_ids');
       }
+      let genesis_pubkey: string | undefined;
+      if (field(body, 'genesis_pubkey') !== undefined) {
+        genesis_pubkey = requireHex32(body, 'genesis_pubkey');
+      }
       const out: TransitionRequestReceive = {
         kind: 'receive',
         subject,
@@ -215,6 +231,9 @@ export function assertTransitionRequest(body: unknown): TransitionRequest {
         npk_rand,
         fold_coin_ids,
       };
+      if (genesis_pubkey !== undefined) {
+        out.genesis_pubkey = genesis_pubkey;
+      }
       if (publisher_pubkey !== undefined) {
         out.publisher_pubkey = publisher_pubkey;
       }
@@ -254,6 +273,9 @@ export function transitionRequestToJson(body: TransitionRequest): Record<string,
       break;
     case 'receive':
       out.fold_coin_ids = req.fold_coin_ids;
+      if (req.genesis_pubkey !== undefined) {
+        out.genesis_pubkey = req.genesis_pubkey;
+      }
       break;
   }
   return out;
