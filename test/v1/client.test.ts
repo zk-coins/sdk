@@ -34,12 +34,26 @@ import {
   pullChallengeMessage,
   PULL_CHALLENGE_DOMAIN,
   buildOwnershipProof,
+  ATTEST_BALANCE_CHALLENGE_DOMAIN,
+  ceilingEncoding,
+  attestRequestHash,
+  attestChallengeMessage,
+  buildAttestOwnershipProof,
+  ISSUE_GRANT_CHALLENGE_DOMAIN,
+  ISSUE_GRANT_REQUEST_TAG,
+  SCOPE_NOT_AFTER_UNBOUNDED,
+  encodeGrantAssetIds,
+  issueGrantRequestHash,
+  buildIssueGrantOwnershipProof,
+  grantScopeToJsonBody,
+  buildGrantProof,
   transitionRequestToJson,
   assertTransitionRequest,
   type TransitionRequest,
   type AwaitingSignature,
   type ProofData,
   type ZkCoinsV1ClientOptions,
+  type PullChallenge,
 } from '../../src/v1/index.js';
 
 const BASE = 'https://node.test';
@@ -943,7 +957,6 @@ describe('ZkCoinsV1Client request surface', () => {
             output_coins_root: '22'.repeat(32),
             input_nullifiers_root: '33'.repeat(32),
             publisher_pubkey: '44'.repeat(32),
-            attestation: 'att',
             output_coin_ids: ['55'.repeat(32)],
           },
         }),
@@ -962,7 +975,6 @@ describe('ZkCoinsV1Client request surface', () => {
     expect(done.job.phase).toBe('published');
     expect(done.job.result?.output_coin_ids).toEqual(['55'.repeat(32)]);
     expect(done.job.result?.publisher_pubkey).toBe('44'.repeat(32));
-    expect(done.job.result?.attestation).toBe('att');
     expect(done.retryAfterMs).toBeNull();
 
     const fail = await newClient().getJob('fail');
@@ -1632,14 +1644,14 @@ describe('ZkCoinsV1Client request surface', () => {
         },
       },
       {
-        // attest_balance completed: digests may be omitted; attestation present.
+        // attest_balance completed: wire form is exclusively { attestation }.
         id: 'ok-attest',
         body: {
           job_id: 'ok-attest',
           kind: 'attest_balance',
           status: 'completed',
           progress: 1,
-          result: { output_coin_ids: [], attestation: 'ff'.repeat(16) },
+          result: { attestation: 'ff'.repeat(16) },
         },
       },
     ];
@@ -1651,7 +1663,12 @@ describe('ZkCoinsV1Client request surface', () => {
       expect(job.job_id).toBe(w.id);
       if (job.status === 'completed') {
         expect(job.result).toBeDefined();
-        expect(Array.isArray(job.result?.output_coin_ids)).toBe(true);
+        if (w.body.kind === 'attest_balance') {
+          expect(typeof job.result?.attestation).toBe('string');
+          expect(job.result?.output_coin_ids).toBeUndefined();
+        } else {
+          expect(Array.isArray(job.result?.output_coin_ids)).toBe(true);
+        }
       }
       if (job.status === 'failed' || job.status === 'cancelled') {
         expect(job.error).toEqual(w.body.error);
@@ -1755,7 +1772,7 @@ describe('ZkCoinsV1Client request surface', () => {
       await expect(newClient().getJob(c.id)).rejects.toThrow(c.message);
     }
 
-    // attest_balance still accepts omitted digests (documented exception).
+    // attest_balance wire form is exclusively { attestation } (no digests).
     server.use(
       http.get(`${BASE}/v1/jobs/digest-attest-ok`, () =>
         HttpResponse.json({
@@ -1763,7 +1780,7 @@ describe('ZkCoinsV1Client request surface', () => {
           kind: 'attest_balance',
           status: 'completed',
           progress: 1,
-          result: { output_coin_ids: [], attestation: 'ff'.repeat(16) },
+          result: { attestation: 'ff'.repeat(16) },
         }),
       ),
     );
@@ -1772,7 +1789,9 @@ describe('ZkCoinsV1Client request surface', () => {
     expect(job.result?.attestation).toBe('ff'.repeat(16));
     expect(job.result?.new_account_state_hash).toBeUndefined();
 
-    // When attest_balance does carry digests, they are form-checked and kept.
+    // Stray transition fields on attest_balance are ignored (not copied).
+    // Real server never co-sends digests with attestation (api
+    // validate_job_result_for_kind); parser keeps only { attestation }.
     server.use(
       http.get(`${BASE}/v1/jobs/digest-attest-with`, () =>
         HttpResponse.json({
@@ -1791,9 +1810,11 @@ describe('ZkCoinsV1Client request surface', () => {
       ),
     );
     const withDigests = await newClient().getJob('digest-attest-with');
-    expect(withDigests.job.result?.new_account_state_hash).toBe(ash);
-    expect(withDigests.job.result?.output_coins_root).toBe(ocr);
-    expect(withDigests.job.result?.input_nullifiers_root).toBe(inr);
+    expect(withDigests.job.result?.attestation).toBe('ee'.repeat(8));
+    expect(withDigests.job.result?.new_account_state_hash).toBeUndefined();
+    expect(withDigests.job.result?.output_coins_root).toBeUndefined();
+    expect(withDigests.job.result?.input_nullifiers_root).toBeUndefined();
+    expect(withDigests.job.result?.output_coin_ids).toBeUndefined();
   });
 
   it('SSE frames delimited by CRLF are processed (not only LF)', async () => {
@@ -2194,5 +2215,1229 @@ describe('ZkCoinsV1Client fail-closed parsers (non-object wire bodies)', () => {
       seen.push(frame.status);
     }
     expect(seen).toEqual(['proving']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attest balance (§7.5 request-side: challenge + OwnershipProof + POST)
+// ---------------------------------------------------------------------------
+
+describe('AttestBalance request surface', () => {
+  const seed = seedFromMnemonicV1(
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+  );
+  const sk0 = deriveSpendKey(seed, 0, 0);
+  const nkCommit = new Uint8Array(32);
+  const subjectRaw = sha256(
+    (() => {
+      const pre = new Uint8Array(64);
+      pre.set(sk0.publicKey, 0);
+      pre.set(nkCommit, 32);
+      return pre;
+    })(),
+  );
+  const subject = encodeZkAddress(subjectRaw);
+  const assetId = new Uint8Array(32).fill(0x02);
+  const host = 'node.test';
+
+  // ---- 1. Known-answer vectors (Python hashlib.sha256; fixed values) ----
+
+  it('ceilingEncoding: both absent → single 0x00 byte', () => {
+    expect(Array.from(ceilingEncoding(undefined, undefined))).toEqual([0x00]);
+    expect(Array.from(ceilingEncoding())).toEqual([0x00]);
+  });
+
+  it('ceilingEncoding: both present → 0x01 ‖ nav(32) ‖ u64-be(size)', () => {
+    const enc = ceilingEncoding(new Uint8Array(32).fill(0x03), 9);
+    expect(encodeHexLower(enc)).toBe(
+      '0103030303030303030303030303030303030303030303030303030303030303030000000000000009',
+    );
+    expect(enc.length).toBe(41);
+  });
+
+  it('attestRequestHash KAT: subject=[1;32], asset=[2;32], ceiling=0x00', () => {
+    const h = attestRequestHash(
+      new Uint8Array(32).fill(1),
+      new Uint8Array(32).fill(2),
+      ceilingEncoding(undefined, undefined),
+    );
+    expect(encodeHexLower(h)).toBe(
+      '18d6a5c4d891c9984be2602b7afd18d32dffb2ff3667b9c946352c41bfea4c63',
+    );
+  });
+
+  it('attestRequestHash KAT: subject=[1;32], asset=[2;32], nav=[3;32], size=9', () => {
+    const h = attestRequestHash(
+      new Uint8Array(32).fill(1),
+      new Uint8Array(32).fill(2),
+      ceilingEncoding(new Uint8Array(32).fill(3), 9),
+    );
+    expect(encodeHexLower(h)).toBe(
+      'b1d282624c49c552c8e31ec16424c2cfcbbc2fb18f82e8608111838284b0a349',
+    );
+  });
+
+  it('attestChallengeMessage KAT: fixed domain/nonce/chanBind/subject/expiry/requestHash', () => {
+    const chal = attestChallengeMessage({
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+      nonce: new Uint8Array(32).fill(0x11),
+      chanBind: new Uint8Array(32).fill(0x22),
+      subjectRaw: new Uint8Array(32).fill(0x33),
+      expiry: 1700000000n,
+      requestHash: new Uint8Array(32).fill(0x44),
+    });
+    expect(encodeHexLower(chal)).toBe(
+      'dcbd51dc183e10cde9fdf57e94a5ff054f270535bb4434085a0b06932b41f734',
+    );
+  });
+
+  // ---- 2. Error paths / no-silent-fallback ----
+
+  it('ceilingEncoding rejects mixed presence and invalid field sizes', () => {
+    const nav = new Uint8Array(32).fill(0x03);
+    expect(() => ceilingEncoding(nav, undefined)).toThrow(/both be present or both omitted/);
+    expect(() => ceilingEncoding(undefined, 9)).toThrow(/both be present or both omitted/);
+    expect(() => ceilingEncoding(new Uint8Array(16), 9)).toThrow(/nav_ceiling must be 32 bytes/);
+    expect(() => ceilingEncoding(nav, -1)).toThrow(/out of u64 range/);
+    expect(() => ceilingEncoding(nav, -1n)).toThrow(/out of u64 range/);
+    expect(() => ceilingEncoding(nav, 0x1_0000_0000_0000_0000n)).toThrow(/out of u64 range/);
+    expect(() => ceilingEncoding(nav, 1.5)).toThrow(/safe integer/);
+  });
+
+  it('attestChallengeMessage / attestRequestHash reject wrong 32-byte field lengths', () => {
+    const ok32 = new Uint8Array(32);
+    expect(() =>
+      attestChallengeMessage({
+        domain: '',
+        nonce: ok32,
+        chanBind: ok32,
+        subjectRaw: ok32,
+        expiry: 1n,
+        requestHash: ok32,
+      }),
+    ).toThrow(/domain is required/);
+    expect(() =>
+      attestChallengeMessage({
+        domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        nonce: new Uint8Array(31),
+        chanBind: ok32,
+        subjectRaw: ok32,
+        expiry: 1n,
+        requestHash: ok32,
+      }),
+    ).toThrow(/nonce must be 32 bytes/);
+    expect(() =>
+      attestChallengeMessage({
+        domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        nonce: ok32,
+        chanBind: new Uint8Array(16),
+        subjectRaw: ok32,
+        expiry: 1n,
+        requestHash: ok32,
+      }),
+    ).toThrow(/chan_bind must be 32 bytes/);
+    expect(() =>
+      attestChallengeMessage({
+        domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        nonce: ok32,
+        chanBind: ok32,
+        subjectRaw: new Uint8Array(8),
+        expiry: 1n,
+        requestHash: ok32,
+      }),
+    ).toThrow(/subject must be 32 bytes/);
+    expect(() =>
+      attestChallengeMessage({
+        domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        nonce: ok32,
+        chanBind: ok32,
+        subjectRaw: ok32,
+        expiry: -1n,
+        requestHash: ok32,
+      }),
+    ).toThrow(/expiry out of u64 range/);
+    expect(() =>
+      attestChallengeMessage({
+        domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        nonce: ok32,
+        chanBind: ok32,
+        subjectRaw: ok32,
+        expiry: 1n,
+        requestHash: new Uint8Array(33),
+      }),
+    ).toThrow(/request_hash must be 32 bytes/);
+    expect(() => attestRequestHash(new Uint8Array(31), ok32, new Uint8Array([0x00]))).toThrow(
+      /subject must be 32 bytes/,
+    );
+    expect(() => attestRequestHash(ok32, new Uint8Array(31), new Uint8Array([0x00]))).toThrow(
+      /asset_id must be 32 bytes/,
+    );
+  });
+
+  it('buildAttestOwnershipProof rejects wrong domain and bad field lengths', () => {
+    const challenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: PULL_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildAttestOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge,
+        host,
+        assetId,
+      }),
+    ).toThrow(/unexpected challenge domain/);
+
+    const goodChallenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildAttestOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit: new Uint8Array(16),
+        challenge: goodChallenge,
+        host,
+        assetId,
+      }),
+    ).toThrow(/nk_commit must be 32 bytes/);
+    expect(() =>
+      buildAttestOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge: goodChallenge,
+        host,
+        assetId: new Uint8Array(8),
+      }),
+    ).toThrow(/asset_id must be 32 bytes/);
+  });
+
+  // ---- 3. Signature round-trip (with and without ceilings) ----
+
+  it('OwnershipProof verifies under BIP-340 over attest chal (no ceilings)', () => {
+    const nonce = new Uint8Array(32).fill(0xbb);
+    const expiry = 1_700_000_060n;
+    const challenge = {
+      nonce: encodeHexLower(nonce),
+      expiry: expiry.toString(),
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+    };
+    const proof = buildAttestOwnershipProof({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      challenge,
+      host,
+      assetId,
+    });
+    const ceilingEnc = ceilingEncoding(undefined, undefined);
+    const requestHash = attestRequestHash(subjectRaw, assetId, ceilingEnc);
+    const chal = attestChallengeMessage({
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+      nonce,
+      chanBind: chanBindForHost(host),
+      subjectRaw,
+      expiry,
+      requestHash,
+    });
+    expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
+      true,
+    );
+    expect(proof.type).toBe('ownership');
+  });
+
+  it('OwnershipProof verifies under BIP-340 over attest chal (with ceilings)', () => {
+    const nonce = new Uint8Array(32).fill(0xcc);
+    const expiry = 1_700_000_070n;
+    const navCeiling = new Uint8Array(32).fill(0x05);
+    const sizeCeiling = 42n;
+    const challenge = {
+      nonce: encodeHexLower(nonce),
+      expiry: expiry.toString(),
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+    };
+    const proof = buildAttestOwnershipProof({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      challenge,
+      host,
+      assetId,
+      navCeiling,
+      sizeCeiling,
+    });
+    const ceilingEnc = ceilingEncoding(navCeiling, sizeCeiling);
+    const requestHash = attestRequestHash(subjectRaw, assetId, ceilingEnc);
+    const chal = attestChallengeMessage({
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+      nonce,
+      chanBind: chanBindForHost(host),
+      subjectRaw,
+      expiry,
+      requestHash,
+    });
+    expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
+      true,
+    );
+  });
+
+  // ---- 4. HTTP-level (msw) ----
+
+  it('openAttestBalanceChallenge posts subject and rejects mismatched domain', async () => {
+    const nonce = 'dd'.repeat(32);
+    const expiry = '1700000080';
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw) || typeof raw['subject'] !== 'string') {
+          throw new Error('attest/balance/challenge body: expected { subject: string }');
+        }
+        expect(raw['subject']).toBe(subject);
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        });
+      }),
+    );
+    const challenge = await newClient().openAttestBalanceChallenge(subject);
+    expect(challenge.nonce).toBe(nonce);
+    expect(challenge.expiry).toBe(expiry);
+    expect(challenge.domain).toBe(ATTEST_BALANCE_CHALLENGE_DOMAIN);
+
+    await expect(newClient().openAttestBalanceChallenge('')).rejects.toThrow(/subject is required/);
+
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        }),
+      ),
+    );
+    await expect(newClient().openAttestBalanceChallenge(subject)).rejects.toThrow(
+      /AttestBalanceChallenge\.domain/,
+    );
+
+    server.use(
+      http.post(
+        `${BASE}/v1/attest/balance/challenge`,
+        () =>
+          new HttpResponse(JSON.stringify('not-an-object'), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+    await expect(newClient().openAttestBalanceChallenge(subject)).rejects.toThrow(
+      /AttestBalanceChallenge: expected object/,
+    );
+  });
+
+  it('attestBalance full flow without ceilings: body omits ceilings, 202 { job_id } only', async () => {
+    const nonce = 'ee'.repeat(32);
+    const expiry = '1700000090';
+    let posted: Record<string, unknown> | undefined;
+
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('challenge body: expected object');
+        expect(raw['subject']).toBe(subject);
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        });
+      }),
+      http.post(`${BASE}/v1/attest/balance`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('attest body: expected object');
+        posted = raw;
+        const proofRaw = raw['ownership_proof'];
+        if (!isJsonRecord(proofRaw) || typeof proofRaw['signature'] !== 'string') {
+          throw new Error('attest body: expected ownership_proof.signature string');
+        }
+        expect(raw['subject']).toBe(subject);
+        expect(raw['asset_id']).toBe(encodeHexLower(assetId));
+        expect(raw['nav_ceiling']).toBeUndefined();
+        expect(raw['size_ceiling']).toBeUndefined();
+        expect('nav_ceiling' in raw).toBe(false);
+        expect('size_ceiling' in raw).toBe(false);
+        const ch = raw['challenge'];
+        if (!isJsonRecord(ch)) throw new Error('challenge: expected object');
+        expect(ch['nonce']).toBe(nonce);
+        expect(ch['expiry']).toBe(expiry);
+        expect(ch['domain']).toBeUndefined();
+        expect('domain' in ch).toBe(false);
+        expect(proofRaw['type']).toBe('ownership');
+        expect(proofRaw['signature']).toMatch(/^[0-9a-f]{128}$/);
+        // No status field — only job_id (api/src/attest.rs L174–188).
+        return HttpResponse.json({ job_id: 'attest-job-1' }, { status: 202 });
+      }),
+    );
+
+    const result = await newClient().attestBalance({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      assetId,
+      host,
+    });
+    expect(result.job_id).toBe('attest-job-1');
+    expect(posted).toBeDefined();
+  });
+
+  it('attestBalance full flow with ceilings: nav_ceiling hex + size_ceiling decimal string', async () => {
+    const nonce = 'ff'.repeat(32);
+    const expiry = '1700000100';
+    const navCeiling = new Uint8Array(32).fill(0x07);
+    const sizeCeiling = 99;
+
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/attest/balance`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('attest body: expected object');
+        expect(raw['nav_ceiling']).toBe(encodeHexLower(navCeiling));
+        // §7.1: size_ceiling is a decimal *string*, not a JSON number.
+        expect(raw['size_ceiling']).toBe('99');
+        expect(typeof raw['size_ceiling']).toBe('string');
+        const proofRaw = raw['ownership_proof'];
+        if (!isJsonRecord(proofRaw) || typeof proofRaw['signature'] !== 'string') {
+          throw new Error('attest body: expected ownership_proof.signature string');
+        }
+        expect(proofRaw['signature']).toMatch(/^[0-9a-f]{128}$/);
+        return HttpResponse.json({ job_id: 'attest-job-ceil' }, { status: 202 });
+      }),
+    );
+
+    const result = await newClient().attestBalance({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      assetId,
+      navCeiling,
+      sizeCeiling,
+      host,
+    });
+    expect(result.job_id).toBe('attest-job-ceil');
+  });
+
+  it('attestBalance rejects mixed ceilings before any network call', async () => {
+    // No handlers registered: msw onUnhandledRequest: 'error' would fail if
+    // a request were attempted.
+    await expect(
+      newClient().attestBalance({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        assetId,
+        navCeiling: new Uint8Array(32).fill(1),
+        host,
+      }),
+    ).rejects.toThrow(/both be present or both omitted/);
+
+    await expect(
+      newClient().attestBalance({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        assetId,
+        sizeCeiling: 1n,
+        host,
+      }),
+    ).rejects.toThrow(/both be present or both omitted/);
+  });
+
+  it('parseAttestBalanceAccepted rejects non-object body', async () => {
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, () =>
+        HttpResponse.json({
+          nonce: '11'.repeat(32),
+          expiry: '1',
+          domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(
+        `${BASE}/v1/attest/balance`,
+        () =>
+          new HttpResponse(JSON.stringify('accepted-please'), {
+            status: 202,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+    await expect(
+      newClient().attestBalance({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        assetId,
+        host,
+      }),
+    ).rejects.toThrow(/AttestBalanceAccepted: expected object/);
+  });
+});
+
+describe('ViewGrant request surface', () => {
+  const seed = seedFromMnemonicV1(
+    'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
+  );
+  const sk0 = deriveSpendKey(seed, 0, 0);
+  const grantee = deriveSpendKey(seed, 0, 1);
+  const nkCommit = new Uint8Array(32);
+  const subjectRaw = sha256(
+    (() => {
+      const pre = new Uint8Array(64);
+      pre.set(sk0.publicKey, 0);
+      pre.set(nkCommit, 32);
+      return pre;
+    })(),
+  );
+  const subject = encodeZkAddress(subjectRaw);
+  const host = 'node.test';
+  const granteePk = grantee.publicKey;
+  const grantExpiry = 1700000000n;
+  // Opaque blob — SDK never decodes zkgrant payloads.
+  const OPAQUE_GRANT = 'zkgrant1qptestopaque-test-grant';
+
+  // ---- 1. Known-answer vectors ----
+
+  it('encodeGrantAssetIds: allAssets → single 0x00 byte', () => {
+    expect(Array.from(encodeGrantAssetIds(true, []))).toEqual([0x00]);
+  });
+
+  it('encodeGrantAssetIds: explicit list → 0x01 ‖ u32-be count ‖ ascending ids', () => {
+    const enc = encodeGrantAssetIds(false, [
+      new Uint8Array(32).fill(0x03),
+      new Uint8Array(32).fill(0x04),
+    ]);
+    expect(encodeHexLower(enc)).toBe(
+      '010000000203030303030303030303030303030303030303030303030303030303030303030404040404040404040404040404040404040404040404040404040404040404',
+    );
+    expect(enc.length).toBe(69);
+  });
+
+  it('issueGrantRequestHash KAT: subject=[1;32], grantee=[2;32], asset=0x00, defaults, expiry=1700000000', () => {
+    const h = issueGrantRequestHash(
+      new Uint8Array(32).fill(0x01),
+      new Uint8Array(32).fill(0x02),
+      encodeGrantAssetIds(true, []),
+      0n,
+      SCOPE_NOT_AFTER_UNBOUNDED,
+      1700000000n,
+    );
+    expect(encodeHexLower(h)).toBe(
+      'a288dab5ad9f25eb3328a3d502b93b51ead04e9417857e035eb4ffb7541383dc',
+    );
+  });
+
+  it('issueGrantRequestHash KAT: subject=[1;32], grantee=[2;32], two assets, not_before=100, not_after=200', () => {
+    const h = issueGrantRequestHash(
+      new Uint8Array(32).fill(0x01),
+      new Uint8Array(32).fill(0x02),
+      encodeGrantAssetIds(false, [new Uint8Array(32).fill(0x03), new Uint8Array(32).fill(0x04)]),
+      100n,
+      200n,
+      1700000000n,
+    );
+    expect(encodeHexLower(h)).toBe(
+      '02a753abd0f7368ac1498bdeeed58ee5fe10501c3395d18b1990f708f60981d8',
+    );
+  });
+
+  it('grantScopeToJsonBody: allAssets emits "*" and resolved bounds', () => {
+    expect(grantScopeToJsonBody({ allAssets: true })).toEqual({
+      asset_ids: '*',
+      not_before: '0',
+      not_after: SCOPE_NOT_AFTER_UNBOUNDED.toString(),
+    });
+    expect(grantScopeToJsonBody({ allAssets: true, notBefore: 10n, notAfter: 20n })).toEqual({
+      asset_ids: '*',
+      not_before: '10',
+      not_after: '20',
+    });
+  });
+
+  it('grantScopeToJsonBody: explicit assetIds as lowercase hex32 in caller order', () => {
+    const a = new Uint8Array(32).fill(0x0a);
+    const b = new Uint8Array(32).fill(0x0b);
+    expect(grantScopeToJsonBody({ assetIds: [a, b], notBefore: 1n })).toEqual({
+      asset_ids: [encodeHexLower(a), encodeHexLower(b)],
+      not_before: '1',
+      not_after: SCOPE_NOT_AFTER_UNBOUNDED.toString(),
+    });
+  });
+
+  // ---- 2. Error paths / no-silent-fallback ----
+
+  it('encodeGrantAssetIds rejects empty list, non-empty under "*", wrong length, non-ascending', () => {
+    expect(() => encodeGrantAssetIds(true, [new Uint8Array(32)])).toThrow(
+      /must be empty when asset_ids is "\*"/,
+    );
+    expect(() => encodeGrantAssetIds(false, [])).toThrow(/must be non-empty when not "\*"/);
+    expect(() => encodeGrantAssetIds(false, [new Uint8Array(16)])).toThrow(
+      /asset_ids\[0\] must be 32 bytes/,
+    );
+    const id = new Uint8Array(32).fill(0x05);
+    expect(() => encodeGrantAssetIds(false, [id, id])).toThrow(/strictly ascending/);
+    const high = new Uint8Array(32).fill(0x09);
+    const low = new Uint8Array(32).fill(0x01);
+    expect(() => encodeGrantAssetIds(false, [high, low])).toThrow(/strictly ascending/);
+  });
+
+  it('issueGrantRequestHash rejects wrong 32-byte fields and out-of-range u64', () => {
+    const ok32 = new Uint8Array(32);
+    const assetEnc = encodeGrantAssetIds(true, []);
+    expect(() => issueGrantRequestHash(new Uint8Array(31), ok32, assetEnc, 0n, 1n, 1n)).toThrow(
+      /subject must be 32 bytes/,
+    );
+    expect(() => issueGrantRequestHash(ok32, new Uint8Array(31), assetEnc, 0n, 1n, 1n)).toThrow(
+      /grantee_pk must be 32 bytes/,
+    );
+    expect(() => issueGrantRequestHash(ok32, ok32, assetEnc, -1n, 1n, 1n)).toThrow(
+      /not_before out of u64 range/,
+    );
+    expect(() => issueGrantRequestHash(ok32, ok32, assetEnc, 0n, -1n, 1n)).toThrow(
+      /not_after out of u64 range/,
+    );
+    expect(() =>
+      issueGrantRequestHash(ok32, ok32, assetEnc, 0n, 1n, 0x1_0000_0000_0000_0000n),
+    ).toThrow(/grant_expiry out of u64 range/);
+  });
+
+  it('grantScopeToJsonBody rejects out-of-range not_before / not_after', () => {
+    expect(() => grantScopeToJsonBody({ allAssets: true, notBefore: -1n })).toThrow(
+      /not_before out of u64 range/,
+    );
+    expect(() =>
+      grantScopeToJsonBody({ allAssets: true, notAfter: 0x1_0000_0000_0000_0000n }),
+    ).toThrow(/not_after out of u64 range/);
+  });
+
+  it('buildIssueGrantOwnershipProof rejects wrong domain and bad field lengths', () => {
+    const challenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: PULL_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildIssueGrantOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge,
+        host,
+        granteePk,
+        scope: { allAssets: true },
+        grantExpiry,
+      }),
+    ).toThrow(/unexpected challenge domain/);
+
+    const goodChallenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildIssueGrantOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit: new Uint8Array(16),
+        challenge: goodChallenge,
+        host,
+        granteePk,
+        scope: { allAssets: true },
+        grantExpiry,
+      }),
+    ).toThrow(/nk_commit must be 32 bytes/);
+    expect(() =>
+      buildIssueGrantOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge: goodChallenge,
+        host,
+        granteePk: new Uint8Array(8),
+        scope: { allAssets: true },
+        grantExpiry,
+      }),
+    ).toThrow(/grantee_pk must be 32 bytes/);
+  });
+
+  it('buildGrantProof rejects wrong domain, empty grant, and bad subject length', () => {
+    const goodChallenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: PULL_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildGrantProof({
+        grant: OPAQUE_GRANT,
+        granteeSecret: grantee.secretKey,
+        subjectRaw,
+        challenge: {
+          nonce: 'aa'.repeat(32),
+          expiry: '1700000000',
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        },
+        host,
+      }),
+    ).toThrow(/unexpected challenge domain/);
+    expect(() =>
+      buildGrantProof({
+        grant: '',
+        granteeSecret: grantee.secretKey,
+        subjectRaw,
+        challenge: goodChallenge,
+        host,
+      }),
+    ).toThrow(/grant is required/);
+    expect(() =>
+      buildGrantProof({
+        grant: OPAQUE_GRANT,
+        granteeSecret: grantee.secretKey,
+        subjectRaw: new Uint8Array(16),
+        challenge: goodChallenge,
+        host,
+      }),
+    ).toThrow(/subject must be 32 bytes/);
+  });
+
+  // ---- 3. Signature round-trips ----
+
+  it('OwnershipProof verifies under BIP-340 over issue-grant chal (allAssets)', () => {
+    const nonce = new Uint8Array(32).fill(0xbb);
+    const expiry = 1_700_000_060n;
+    const challenge = {
+      nonce: encodeHexLower(nonce),
+      expiry: expiry.toString(),
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+    };
+    const scope = { allAssets: true as const };
+    const proof = buildIssueGrantOwnershipProof({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      challenge,
+      host,
+      granteePk,
+      scope,
+      grantExpiry,
+    });
+    const assetEnc = encodeGrantAssetIds(true, []);
+    const requestHash = issueGrantRequestHash(
+      subjectRaw,
+      granteePk,
+      assetEnc,
+      0n,
+      SCOPE_NOT_AFTER_UNBOUNDED,
+      grantExpiry,
+    );
+    const chal = attestChallengeMessage({
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+      nonce,
+      chanBind: chanBindForHost(host),
+      subjectRaw,
+      expiry,
+      requestHash,
+    });
+    expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
+      true,
+    );
+    expect(proof.type).toBe('ownership');
+  });
+
+  it('OwnershipProof verifies under BIP-340 over issue-grant chal (explicit assetIds)', () => {
+    const nonce = new Uint8Array(32).fill(0xcc);
+    const expiry = 1_700_000_070n;
+    const assetIds = [new Uint8Array(32).fill(0x03), new Uint8Array(32).fill(0x04)];
+    const challenge = {
+      nonce: encodeHexLower(nonce),
+      expiry: expiry.toString(),
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+    };
+    const scope = { assetIds, notBefore: 100n, notAfter: 200n };
+    const proof = buildIssueGrantOwnershipProof({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      challenge,
+      host,
+      granteePk,
+      scope,
+      grantExpiry,
+    });
+    const assetEnc = encodeGrantAssetIds(false, assetIds);
+    const requestHash = issueGrantRequestHash(
+      subjectRaw,
+      granteePk,
+      assetEnc,
+      100n,
+      200n,
+      grantExpiry,
+    );
+    const chal = attestChallengeMessage({
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+      nonce,
+      chanBind: chanBindForHost(host),
+      subjectRaw,
+      expiry,
+      requestHash,
+    });
+    expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
+      true,
+    );
+  });
+
+  it('GrantProof verifies under BIP-340 over plain pull chal', () => {
+    const nonce = new Uint8Array(32).fill(0xdd);
+    const expiry = 1_700_000_080n;
+    const challenge: PullChallenge = {
+      nonce: encodeHexLower(nonce),
+      expiry: expiry.toString(),
+      domain: PULL_CHALLENGE_DOMAIN,
+    };
+    const proof = buildGrantProof({
+      grant: OPAQUE_GRANT,
+      granteeSecret: grantee.secretKey,
+      subjectRaw,
+      challenge,
+      host,
+    });
+    const chal = pullChallengeMessage({
+      domain: PULL_CHALLENGE_DOMAIN,
+      nonce,
+      chanBind: chanBindForHost(host),
+      subjectRaw,
+      expiry,
+    });
+    expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.grantee_pk))).toBe(
+      true,
+    );
+    expect(proof.type).toBe('grant');
+    expect(proof.grant).toBe(OPAQUE_GRANT);
+    expect(proof.grantee_pk).toBe(encodeHexLower(grantee.publicKey));
+  });
+
+  // ---- 4. HTTP-level (msw) ----
+
+  it('openGrantsChallenge posts subject and rejects mismatched domain', async () => {
+    const nonce = 'ee'.repeat(32);
+    const expiry = '1700000080';
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw) || typeof raw['subject'] !== 'string') {
+          throw new Error('grants/challenge body: expected { subject: string }');
+        }
+        expect(raw['subject']).toBe(subject);
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        });
+      }),
+    );
+    const challenge = await newClient().openGrantsChallenge(subject);
+    expect(challenge.nonce).toBe(nonce);
+    expect(challenge.expiry).toBe(expiry);
+    expect(challenge.domain).toBe(ISSUE_GRANT_CHALLENGE_DOMAIN);
+
+    await expect(newClient().openGrantsChallenge('')).rejects.toThrow(/subject is required/);
+
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        }),
+      ),
+    );
+    await expect(newClient().openGrantsChallenge(subject)).rejects.toThrow(
+      /GrantsChallenge\.domain/,
+    );
+
+    server.use(
+      http.post(
+        `${BASE}/v1/grants/challenge`,
+        () =>
+          new HttpResponse(JSON.stringify('not-an-object'), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+    await expect(newClient().openGrantsChallenge(subject)).rejects.toThrow(
+      /GrantsChallenge: expected object/,
+    );
+  });
+
+  it('issueViewGrant full flow with allAssets: scope "*", explicit not_before/not_after', async () => {
+    const nonce = '11'.repeat(32);
+    const expiry = '1700000090';
+    let posted: Record<string, unknown> | undefined;
+
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('challenge body: expected object');
+        expect(raw['subject']).toBe(subject);
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        });
+      }),
+      http.post(`${BASE}/v1/grants`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('grants body: expected object');
+        posted = raw;
+        const proofRaw = raw['ownership_proof'];
+        if (!isJsonRecord(proofRaw) || typeof proofRaw['signature'] !== 'string') {
+          throw new Error('grants body: expected ownership_proof.signature string');
+        }
+        expect(raw['subject']).toBe(subject);
+        expect(raw['grantee_pk']).toBe(encodeHexLower(granteePk));
+        expect(raw['expiry']).toBe(grantExpiry.toString());
+        const scope = raw['scope'];
+        if (!isJsonRecord(scope)) throw new Error('scope: expected object');
+        expect(scope['asset_ids']).toBe('*');
+        expect(scope['not_before']).toBe('0');
+        expect(scope['not_after']).toBe(SCOPE_NOT_AFTER_UNBOUNDED.toString());
+        const ch = raw['challenge'];
+        if (!isJsonRecord(ch)) throw new Error('challenge: expected object');
+        expect(ch['nonce']).toBe(nonce);
+        expect(ch['expiry']).toBe(expiry);
+        expect(ch['domain']).toBeUndefined();
+        expect('domain' in ch).toBe(false);
+        expect(proofRaw['type']).toBe('ownership');
+        expect(proofRaw['signature']).toMatch(/^[0-9a-f]{128}$/);
+        return HttpResponse.json({ grant: OPAQUE_GRANT });
+      }),
+    );
+
+    const result = await newClient().issueViewGrant({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      granteePk,
+      scope: { allAssets: true },
+      grantExpiry,
+      host,
+    });
+    expect(result.grant).toBe(OPAQUE_GRANT);
+    expect(posted).toBeDefined();
+  });
+
+  it('issueViewGrant full flow with explicit assetIds and custom bounds', async () => {
+    const nonce = '22'.repeat(32);
+    const expiry = '1700000100';
+    const assetIds = [new Uint8Array(32).fill(0x03), new Uint8Array(32).fill(0x04)];
+
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/grants`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('grants body: expected object');
+        const scope = raw['scope'];
+        if (!isJsonRecord(scope)) throw new Error('scope: expected object');
+        expect(scope['asset_ids']).toEqual([
+          encodeHexLower(assetIds[0]!),
+          encodeHexLower(assetIds[1]!),
+        ]);
+        expect(scope['not_before']).toBe('100');
+        expect(scope['not_after']).toBe('200');
+        const proofRaw = raw['ownership_proof'];
+        if (!isJsonRecord(proofRaw) || typeof proofRaw['signature'] !== 'string') {
+          throw new Error('grants body: expected ownership_proof.signature string');
+        }
+        expect(proofRaw['signature']).toMatch(/^[0-9a-f]{128}$/);
+        return HttpResponse.json({ grant: 'zkgrant1explicit' });
+      }),
+    );
+
+    const result = await newClient().issueViewGrant({
+      subject,
+      sk0: sk0.secretKey,
+      nkCommit,
+      granteePk,
+      scope: { assetIds, notBefore: 100n, notAfter: 200n },
+      grantExpiry,
+      host,
+    });
+    expect(result.grant).toBe('zkgrant1explicit');
+  });
+
+  it('issueViewGrant rejects bad scope before any network call', async () => {
+    // No handlers registered: msw onUnhandledRequest: 'error' would fail if
+    // a request were attempted.
+    await expect(
+      newClient().issueViewGrant({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        granteePk,
+        scope: { assetIds: [] },
+        grantExpiry,
+        host,
+      }),
+    ).rejects.toThrow(/must be non-empty when not "\*"/);
+
+    const unsorted = [new Uint8Array(32).fill(0x09), new Uint8Array(32).fill(0x01)];
+    await expect(
+      newClient().issueViewGrant({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        granteePk,
+        scope: { assetIds: unsorted },
+        grantExpiry,
+        host,
+      }),
+    ).rejects.toThrow(/strictly ascending/);
+  });
+
+  it('parseIssueGrantResult rejects non-object body', async () => {
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, () =>
+        HttpResponse.json({
+          nonce: '33'.repeat(32),
+          expiry: '1',
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(
+        `${BASE}/v1/grants`,
+        () =>
+          new HttpResponse(JSON.stringify('not-a-grant'), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+      ),
+    );
+    await expect(
+      newClient().issueViewGrant({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        granteePk,
+        scope: { allAssets: true },
+        grantExpiry,
+        host,
+      }),
+    ).rejects.toThrow(/IssueGrantResult: expected object/);
+  });
+
+  it('openGrantPullSession posts challenge then pull with GrantProof; no scope when omitted', async () => {
+    const nonce = '44'.repeat(32);
+    const expiry = '1700000110';
+    let pullBody: Record<string, unknown> | undefined;
+
+    server.use(
+      http.post(`${BASE}/v1/pull/challenge`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw) || typeof raw['subject'] !== 'string') {
+          throw new Error('pull/challenge body: expected { subject: string }');
+        }
+        expect(raw['subject']).toBe(subject);
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        });
+      }),
+      http.post(`${BASE}/v1/pull`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('pull body: expected object');
+        pullBody = raw;
+        const proofRaw = raw['proof'];
+        if (!isJsonRecord(proofRaw) || typeof proofRaw['signature'] !== 'string') {
+          throw new Error('pull body: expected proof.signature string');
+        }
+        expect(raw['nonce']).toBe(nonce);
+        expect(raw['expiry']).toBe(expiry);
+        expect(proofRaw['type']).toBe('grant');
+        expect(proofRaw['grant']).toBe(OPAQUE_GRANT);
+        expect(proofRaw['grantee_pk']).toBe(encodeHexLower(grantee.publicKey));
+        expect(proofRaw['signature']).toMatch(/^[0-9a-f]{128}$/);
+        expect(raw['scope']).toBeUndefined();
+        expect('scope' in raw).toBe(false);
+        return HttpResponse.json({
+          records: [],
+          session: 'grant-session-tok',
+          session_expiry: '1700001000',
+        });
+      }),
+    );
+
+    const pull = await newClient().openGrantPullSession({
+      subject,
+      grant: OPAQUE_GRANT,
+      granteeSecret: grantee.secretKey,
+    });
+    expect(pull.session).toBe('grant-session-tok');
+    expect(pullBody).toBeDefined();
+  });
+
+  it('openGrantPullSession with scope echoes resolved scope on pull body', async () => {
+    const nonce = '55'.repeat(32);
+    const expiry = '1700000120';
+    const assetIds = [new Uint8Array(32).fill(0x03)];
+
+    server.use(
+      http.post(`${BASE}/v1/pull/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/pull`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('pull body: expected object');
+        const scope = raw['scope'];
+        if (!isJsonRecord(scope)) throw new Error('scope: expected object');
+        expect(scope['asset_ids']).toEqual([encodeHexLower(assetIds[0]!)]);
+        expect(scope['not_before']).toBe('0');
+        expect(scope['not_after']).toBe(SCOPE_NOT_AFTER_UNBOUNDED.toString());
+        const proofRaw = raw['proof'];
+        if (!isJsonRecord(proofRaw)) throw new Error('proof: expected object');
+        expect(proofRaw['type']).toBe('grant');
+        return HttpResponse.json({
+          records: [],
+          session: 'grant-scope-session',
+          session_expiry: '1700002000',
+        });
+      }),
+    );
+
+    const pull = await newClient().openGrantPullSession(
+      {
+        subject,
+        grant: OPAQUE_GRANT,
+        granteeSecret: grantee.secretKey,
+      },
+      { assetIds },
+    );
+    expect(pull.session).toBe('grant-scope-session');
+  });
+
+  it('constants match Rust ownership.rs literals', () => {
+    expect(ISSUE_GRANT_CHALLENGE_DOMAIN).toBe('zkCoins/v1/IssueGrantChallenge');
+    expect(ISSUE_GRANT_REQUEST_TAG).toBe('zkCoins/v1/IssueGrant');
+    expect(SCOPE_NOT_AFTER_UNBOUNDED).toBe(9223372036854775807n);
+  });
+
+  // ---------------------------------------------------------------------------
+  // parseJob completed-result kind branching (attest_balance vs transition)
+  // ---------------------------------------------------------------------------
+
+  it('getJob parses completed attest_balance wire form without output_coin_ids', async () => {
+    // Live wire: node completed_attest_result is exclusively { attestation }.
+    // Previously parseJob always required output_coin_ids and threw for every
+    // successful attest_balance job.
+    const attestation = 'ab'.repeat(40);
+    server.use(
+      http.get(`${BASE}/v1/jobs/attest-done`, () =>
+        HttpResponse.json({
+          job_id: 'attest-done',
+          kind: 'attest_balance',
+          status: 'completed',
+          progress: 1,
+          result: { attestation },
+        }),
+      ),
+    );
+    const { job } = await newClient().getJob('attest-done');
+    expect(job.status).toBe('completed');
+    expect(job.kind).toBe('attest_balance');
+    expect(job.result?.attestation).toBe(attestation);
+    expect(job.result?.output_coin_ids).toBeUndefined();
+    expect(job.result?.new_account_state_hash).toBeUndefined();
+    expect(job.result?.publisher_pubkey).toBeUndefined();
+  });
+
+  it('getJob rejects completed job with unknown kind', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/kind-foo`, () =>
+        HttpResponse.json({
+          job_id: 'kind-foo',
+          kind: 'foo',
+          status: 'completed',
+          progress: 1,
+          result: { attestation: 'aa' },
+        }),
+      ),
+    );
+    await expect(newClient().getJob('kind-foo')).rejects.toThrow(
+      /unsupported completed job kind.*"foo"/,
+    );
+  });
+
+  it('getJob rejects invalid attest_balance attestation forms', async () => {
+    const cases: Array<{ id: string; result: Record<string, unknown>; message: RegExp }> = [
+      {
+        id: 'attest-missing',
+        result: {},
+        message: /job\.result\.attestation: expected non-empty hex string/,
+      },
+      {
+        id: 'attest-empty',
+        result: { attestation: '' },
+        message: /job\.result\.attestation: expected non-empty hex string/,
+      },
+      {
+        id: 'attest-upper',
+        result: { attestation: 'AA' },
+        message: /job\.result\.attestation: non-canonical hex/,
+      },
+      {
+        id: 'attest-odd',
+        result: { attestation: 'abc' },
+        message: /job\.result\.attestation: non-canonical hex/,
+      },
+      {
+        id: 'attest-not-string',
+        result: { attestation: 42 },
+        message: /job\.result\.attestation: expected non-empty hex string/,
+      },
+    ];
+
+    for (const c of cases) {
+      server.use(
+        http.get(`${BASE}/v1/jobs/${c.id}`, () =>
+          HttpResponse.json({
+            job_id: c.id,
+            kind: 'attest_balance',
+            status: 'completed',
+            progress: 1,
+            result: c.result,
+          }),
+        ),
+      );
+      await expect(newClient().getJob(c.id)).rejects.toThrow(c.message);
+    }
   });
 });

@@ -12,6 +12,10 @@
  *   POST /v1/pull/challenge          → api/src/pull.rs `post_pull_challenge`
  *   POST /v1/pull                    → api/src/pull.rs `post_pull` (nonce+expiry+proof)
  *   GET  /v1/account/state           → api/src/pull.rs `get_account_state` (Bearer)
+ *   POST /v1/attest/balance/challenge → api/src/attest.rs `post_attest_balance_challenge`
+ *   POST /v1/attest/balance          → api/src/attest.rs `post_attest_balance`
+ *   POST /v1/grants/challenge        → api/src/grants.rs `post_grants_challenge`
+ *   POST /v1/grants                  → api/src/grants.rs `post_grants`
  *   GET  /v1/info                    → api/src/info.rs `get_info`
  *
  * No mock mode. No silent fallbacks. Session tokens are never logged or
@@ -20,13 +24,28 @@
 
 import { REQUEST_TIMEOUT_MS } from '../config.js';
 import {
+  ATTEST_BALANCE_CHALLENGE_DOMAIN,
+  buildAttestOwnershipProof,
+  ceilingEncoding,
+} from './attest.js';
+import { decodeZkAddress } from './bech32m.js';
+import {
   assertOutputDeliveries,
   PaymentIdentityPinStore,
   type VerifyDeliveryOptions,
 } from './delivery.js';
 import { redactBearerToken, V1ApiError } from './errors.js';
 import { expectPresent } from './expectPresent.js';
-import { decodeHexExact } from './hex.js';
+import {
+  ISSUE_GRANT_CHALLENGE_DOMAIN,
+  buildGrantProof,
+  buildIssueGrantOwnershipProof,
+  encodeGrantAssetIds,
+  grantScopeToJsonBody,
+  type GrantProofJson,
+  type GrantScopeInput,
+} from './grant.js';
+import { decodeHexExact, encodeHexLower } from './hex.js';
 import type { Network } from './mstate.js';
 import {
   buildOwnershipProof,
@@ -71,8 +90,10 @@ export interface V1JobResult {
   new_account_state_hash?: string;
   output_coins_root?: string;
   input_nullifiers_root?: string;
-  output_coin_ids: string[];
+  /** Present only for kind ∈ {mint,send,receive}. Absent for attest_balance. */
+  output_coin_ids?: string[];
   publisher_pubkey?: string;
+  /** Present only for kind === 'attest_balance'. Absent for mint/send/receive. */
   attestation?: string;
 }
 
@@ -509,18 +530,22 @@ export class ZkCoinsV1Client {
   }
 
   /**
-   * `POST /v1/pull` with OwnershipProof.
-   * Beleg: api/src/pull.rs `post_pull` L344–428 — body `{ nonce, expiry, proof }`
+   * `POST /v1/pull` with OwnershipProof or GrantProof.
+   * Beleg: api/src/pull.rs `post_pull` — body `{ nonce, expiry, proof, scope? }`
    * (Redeem-body `expiry` normative on the stateless API edge).
    *
    * Returns the opaque session token; the caller holds it and presents it as
    * `Authorization: Bearer <token>`. The token is never stored on this client
    * instance and never appears in thrown messages.
+   *
+   * When `scope` is omitted the body is byte-identical to the ownership-only
+   * form (no `scope` key). When provided, the resolved scope is echoed.
    */
   async openPullSession(
     input: {
       challenge: PullChallenge;
-      proof: OwnershipProofJson;
+      proof: OwnershipProofJson | GrantProofJson;
+      scope?: GrantScopeInput;
     },
     signal?: AbortSignal,
   ): Promise<V1PullResult> {
@@ -528,6 +553,7 @@ export class ZkCoinsV1Client {
       nonce: input.challenge.nonce,
       expiry: input.challenge.expiry,
       proof: input.proof,
+      ...(input.scope !== undefined ? { scope: grantScopeToJsonBody(input.scope) } : {}),
     };
     const data = await this.requestJson('/v1/pull', {
       method: 'POST',
@@ -557,6 +583,214 @@ export class ZkCoinsV1Client {
       host: this.host,
     });
     return this.openPullSession({ challenge, proof }, signal);
+  }
+
+  /**
+   * Convenience: pull challenge → sign GrantProof with grantee secret → pull session.
+   * Uses the same `POST /v1/pull/challenge` as ownership (no separate grant-pull endpoint).
+   * `subject` is the Bech32m address the grant names; the SDK decodes it to raw bytes
+   * for the chal (it does not decode the opaque grant string).
+   */
+  async openGrantPullSession(
+    input: {
+      subject: string;
+      grant: string;
+      granteeSecret: Uint8Array;
+    },
+    scope?: GrantScopeInput,
+    signal?: AbortSignal,
+  ): Promise<V1PullResult> {
+    const challenge = await this.openPullChallenge(input.subject, signal);
+    const subjectRaw = decodeZkAddress(input.subject);
+    const proof = buildGrantProof({
+      grant: input.grant,
+      granteeSecret: input.granteeSecret,
+      subjectRaw,
+      challenge,
+      host: this.host,
+    });
+    return this.openPullSession(
+      {
+        challenge,
+        proof,
+        ...(scope !== undefined ? { scope } : {}),
+      },
+      signal,
+    );
+  }
+
+  // ---- Attest balance (§7.5) ---------------------------------------------
+
+  /**
+   * `POST /v1/attest/balance/challenge`.
+   * Beleg: api/src/attest.rs `post_attest_balance_challenge`.
+   * Response shape matches PullChallenge (nonce/expiry/domain); domain is
+   * checked against ATTEST_BALANCE_CHALLENGE_DOMAIN, not PULL_CHALLENGE_DOMAIN.
+   */
+  async openAttestBalanceChallenge(subject: string, signal?: AbortSignal): Promise<PullChallenge> {
+    if (subject.length === 0) {
+      throw new Error('openAttestBalanceChallenge: subject is required');
+    }
+    const data = await this.requestJson('/v1/attest/balance/challenge', {
+      method: 'POST',
+      body: JSON.stringify({ subject }),
+      ...(signal ? { signal } : {}),
+    });
+    return parseAttestBalanceChallenge(data);
+  }
+
+  /**
+   * Challenge → sign OwnershipProof (request_hash-bound) → POST /v1/attest/balance.
+   * Beleg: api/src/attest.rs `post_attest_balance` — body carries subject,
+   * asset_id, optional nav_ceiling/size_ceiling, challenge echo {nonce,expiry},
+   * and ownership_proof. Response is `202 { job_id }` with no status field.
+   *
+   * navCeiling/sizeCeiling must both be set or both omitted — enforced before
+   * any network call (ceilingEncoding fail-closed).
+   */
+  async attestBalance(
+    input: {
+      subject: string;
+      sk0: Uint8Array;
+      nkCommit: Uint8Array;
+      assetId: Uint8Array;
+      navCeiling?: Uint8Array;
+      sizeCeiling?: bigint | number;
+      host: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ job_id: string }> {
+    // Fail-closed before network I/O: mixed ceilings must not open a challenge.
+    ceilingEncoding(input.navCeiling, input.sizeCeiling);
+
+    const challenge = await this.openAttestBalanceChallenge(input.subject, signal);
+    const proof = buildAttestOwnershipProof({
+      subject: input.subject,
+      sk0: input.sk0,
+      nkCommit: input.nkCommit,
+      challenge,
+      host: input.host,
+      assetId: input.assetId,
+      ...(input.navCeiling !== undefined ? { navCeiling: input.navCeiling } : {}),
+      ...(input.sizeCeiling !== undefined ? { sizeCeiling: input.sizeCeiling } : {}),
+    });
+
+    const body: {
+      subject: string;
+      asset_id: string;
+      nav_ceiling?: string;
+      size_ceiling?: string;
+      challenge: { nonce: string; expiry: string };
+      ownership_proof: OwnershipProofJson;
+    } = {
+      subject: input.subject,
+      asset_id: encodeHexLower(input.assetId),
+      challenge: { nonce: challenge.nonce, expiry: challenge.expiry },
+      ownership_proof: proof,
+    };
+    if (input.navCeiling !== undefined) {
+      body.nav_ceiling = encodeHexLower(input.navCeiling);
+    }
+    if (input.sizeCeiling !== undefined) {
+      body.size_ceiling = String(input.sizeCeiling);
+    }
+
+    const data = await this.requestJson('/v1/attest/balance', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    return parseAttestBalanceAccepted(data);
+  }
+
+  // ---- Issue view grant (§7.5) -------------------------------------------
+
+  /**
+   * `POST /v1/grants/challenge`.
+   * Beleg: api/src/grants.rs `post_grants_challenge`.
+   * Response shape matches PullChallenge (nonce/expiry/domain); domain is
+   * checked against ISSUE_GRANT_CHALLENGE_DOMAIN, not PULL_CHALLENGE_DOMAIN.
+   */
+  async openGrantsChallenge(subject: string, signal?: AbortSignal): Promise<PullChallenge> {
+    if (subject.length === 0) {
+      throw new Error('openGrantsChallenge: subject is required');
+    }
+    const data = await this.requestJson('/v1/grants/challenge', {
+      method: 'POST',
+      body: JSON.stringify({ subject }),
+      ...(signal ? { signal } : {}),
+    });
+    return parseGrantsChallenge(data);
+  }
+
+  /**
+   * Challenge → sign OwnershipProof (request_hash-bound) → POST /v1/grants.
+   * Beleg: api/src/grants.rs `post_grants` — body carries subject, grantee_pk,
+   * scope, grant-level expiry, challenge echo {nonce,expiry}, and ownership_proof.
+   * Response is `200 { grant }` (Bech32m zkgrant string).
+   *
+   * Scope asset encoding is validated before any network call (encodeGrantAssetIds
+   * fail-closed), matching attestBalance's ceilingEncoding ordering.
+   */
+  async issueViewGrant(
+    input: {
+      subject: string;
+      sk0: Uint8Array;
+      nkCommit: Uint8Array;
+      granteePk: Uint8Array;
+      scope: GrantScopeInput;
+      grantExpiry: bigint;
+      host: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ grant: string }> {
+    // Snapshot the scope before any await so the signed request_hash (derived
+    // after the challenge round-trip) and the wire body (derived before it)
+    // cannot diverge if the caller mutates the passed scope/assetIds during the
+    // network I/O. All later derivations use this immutable snapshot only.
+    const scope: GrantScopeInput =
+      input.scope.allAssets === true
+        ? { ...input.scope }
+        : {
+            ...input.scope,
+            assetIds: input.scope.assetIds.map((id) => Uint8Array.from(id)),
+          };
+
+    // Fail-closed before network I/O: bad scope must not open a challenge.
+    if (scope.allAssets === true) {
+      encodeGrantAssetIds(true, []);
+    } else {
+      encodeGrantAssetIds(false, scope.assetIds);
+    }
+    const scopeBody = grantScopeToJsonBody(scope);
+
+    const challenge = await this.openGrantsChallenge(input.subject, signal);
+    const proof = buildIssueGrantOwnershipProof({
+      subject: input.subject,
+      sk0: input.sk0,
+      nkCommit: input.nkCommit,
+      challenge,
+      host: input.host,
+      granteePk: input.granteePk,
+      scope,
+      grantExpiry: input.grantExpiry,
+    });
+
+    const body = {
+      subject: input.subject,
+      grantee_pk: encodeHexLower(input.granteePk),
+      scope: scopeBody,
+      expiry: input.grantExpiry.toString(),
+      challenge: { nonce: challenge.nonce, expiry: challenge.expiry },
+      ownership_proof: proof,
+    };
+
+    const data = await this.requestJson('/v1/grants', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    return parseIssueGrantResult(data);
   }
 
   /**
@@ -802,16 +1036,20 @@ function parseAwaitingSignature(data: unknown): AwaitingSignature {
 
 /**
  * Parse a §7.5 job poll / terminal-SSE object. Fail-closed on terminal
- * payload rules (mirror api/src/jobs.rs `job_to_json`):
+ * payload rules (mirror api/src/jobs.rs `job_to_json` / `validate_job_result_for_kind`):
  *
  * - `awaiting_signature` → `awaiting_signature` object with all nine fields
- * - `completed` → `result` object (with `output_coin_ids: string[]`)
+ * - `completed` → kind-disjoint `result` (see below)
  * - `failed` | `cancelled` → `error` object `{ error, message }`
  *
- * For `kind ∈ {mint,send,receive}` a completed result **must** carry the
- * three digests as 32-byte hex (`new_account_state_hash`, `output_coins_root`,
- * `input_nullifiers_root`) plus hex-typed `output_coin_ids`. Only
- * `attest_balance` may omit digests (api `job_result_json`).
+ * Completed result shapes are hard-disjoint (api `validate_job_result_for_kind`):
+ * - `kind ∈ {mint,send,receive}` → `output_coin_ids` (hex array) + the three
+ *   32-byte digests (`new_account_state_hash`, `output_coins_root`,
+ *   `input_nullifiers_root`) + optional `publisher_pubkey`; **never**
+ *   `attestation`.
+ * - `kind === 'attest_balance'` → exclusively `{ attestation: lowercase-hex }`
+ *   (variable length); **never** digests / `output_coin_ids` / `publisher_pubkey`.
+ * - any other `kind` → error (closed set: mint|send|receive|attest_balance).
  */
 function parseJob(data: unknown): V1Job {
   if (!isRecord(data)) throw new Error('job: expected object');
@@ -837,21 +1075,21 @@ function parseJob(data: unknown): V1Job {
   if (status === 'completed') {
     const resultRaw = expectPresent(data.result, 'job status is completed but result is absent');
     if (!isRecord(resultRaw)) throw new Error('job.result: expected object');
-    const coinIds = resultRaw.output_coin_ids;
-    if (!Array.isArray(coinIds)) {
-      throw new Error('job.result.output_coin_ids: expected array');
-    }
-    const output_coin_ids = coinIds.map((c, i) => {
-      if (typeof c !== 'string') {
-        throw new Error(`job.result.output_coin_ids[${i}]: expected string`);
-      }
-      decodeHexExact(c, 32, `job.result.output_coin_ids[${i}]`);
-      return c;
-    });
-    job.result = { output_coin_ids };
 
-    const requiresDigests = kind === 'mint' || kind === 'send' || kind === 'receive';
-    if (requiresDigests) {
+    if (kind === 'mint' || kind === 'send' || kind === 'receive') {
+      const coinIds = resultRaw.output_coin_ids;
+      if (!Array.isArray(coinIds)) {
+        throw new Error('job.result.output_coin_ids: expected array');
+      }
+      const output_coin_ids = coinIds.map((c, i) => {
+        if (typeof c !== 'string') {
+          throw new Error(`job.result.output_coin_ids[${i}]: expected string`);
+        }
+        decodeHexExact(c, 32, `job.result.output_coin_ids[${i}]`);
+        return c;
+      });
+      job.result = { output_coin_ids };
+
       job.result.new_account_state_hash = requireResultHex32(
         resultRaw,
         'new_account_state_hash',
@@ -863,27 +1101,21 @@ function parseJob(data: unknown): V1Job {
         'input_nullifiers_root',
         kind,
       );
+      if (typeof resultRaw.publisher_pubkey === 'string') {
+        decodeHexExact(resultRaw.publisher_pubkey, 32, 'job.result.publisher_pubkey');
+        job.result.publisher_pubkey = resultRaw.publisher_pubkey;
+      }
+    } else if (kind === 'attest_balance') {
+      // Wire form is exclusively { attestation } (node completed_attest_result;
+      // api validates no transition digest fields). Extra keys are ignored.
+      const attestation = requireAttestationHex(resultRaw.attestation, 'job.result.attestation');
+      job.result = { attestation };
     } else {
-      // attest_balance (and any future non-transition kind): digests optional.
-      if (typeof resultRaw.new_account_state_hash === 'string') {
-        decodeHexExact(resultRaw.new_account_state_hash, 32, 'job.result.new_account_state_hash');
-        job.result.new_account_state_hash = resultRaw.new_account_state_hash;
-      }
-      if (typeof resultRaw.output_coins_root === 'string') {
-        decodeHexExact(resultRaw.output_coins_root, 32, 'job.result.output_coins_root');
-        job.result.output_coins_root = resultRaw.output_coins_root;
-      }
-      if (typeof resultRaw.input_nullifiers_root === 'string') {
-        decodeHexExact(resultRaw.input_nullifiers_root, 32, 'job.result.input_nullifiers_root');
-        job.result.input_nullifiers_root = resultRaw.input_nullifiers_root;
-      }
-    }
-    if (typeof resultRaw.publisher_pubkey === 'string') {
-      decodeHexExact(resultRaw.publisher_pubkey, 32, 'job.result.publisher_pubkey');
-      job.result.publisher_pubkey = resultRaw.publisher_pubkey;
-    }
-    if (typeof resultRaw.attestation === 'string') {
-      job.result.attestation = resultRaw.attestation;
+      // Closed set: api/src/jobs.rs CLOSED_JOB_KINDS = mint|send|receive|attest_balance.
+      throw new Error(
+        `job.result: unsupported completed job kind ${JSON.stringify(kind)} ` +
+          '(closed set: mint|send|receive|attest_balance)',
+      );
     }
   }
   if (status === 'failed' || status === 'cancelled') {
@@ -911,6 +1143,25 @@ function requireResultHex32(
   }
   decodeHexExact(v, 32, `job.result.${key}`);
   return v;
+}
+
+/**
+ * Non-empty, even-length, lowercase-hex `attestation` on a completed
+ * attest_balance result. No fixed byte length (variable-size C_balance
+ * proof) — unlike requireResultHex32, this does not decode to bytes, the
+ * SDK only passes the hex string through (thin-client: no proof
+ * verification here).
+ */
+function requireAttestationHex(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${field}: expected non-empty hex string`);
+  }
+  if (!/^(?:[0-9a-f]{2})+$/.test(value)) {
+    throw new Error(
+      `${field}: non-canonical hex (must be lowercase 0-9a-f byte-pairs, no 0x/whitespace)`,
+    );
+  }
+  return value;
 }
 
 /**
@@ -950,6 +1201,55 @@ function parsePullChallenge(data: unknown): PullChallenge {
     expiry: requireString(data, 'expiry'),
     domain,
   };
+}
+
+/** AttestBalance challenge response — same fields as PullChallenge, own domain. */
+function parseAttestBalanceChallenge(data: unknown): PullChallenge {
+  if (!isRecord(data)) throw new Error('AttestBalanceChallenge: expected object');
+  const domain = requireString(data, 'domain');
+  if (domain !== ATTEST_BALANCE_CHALLENGE_DOMAIN) {
+    throw new Error(
+      `AttestBalanceChallenge.domain must be ${JSON.stringify(ATTEST_BALANCE_CHALLENGE_DOMAIN)}, got ${JSON.stringify(domain)}`,
+    );
+  }
+  return {
+    nonce: requireString(data, 'nonce'),
+    expiry: requireString(data, 'expiry'),
+    domain,
+  };
+}
+
+/**
+ * §7.5 L2894: `202 { job_id }` — no status field on this admit response.
+ * Do not reuse parseJobAccepted (which requires status: "accepted").
+ */
+function parseAttestBalanceAccepted(data: unknown): { job_id: string } {
+  if (!isRecord(data)) throw new Error('AttestBalanceAccepted: expected object');
+  const job_id = requireString(data, 'job_id');
+  return { job_id };
+}
+
+/** IssueGrant challenge response — same fields as PullChallenge, own domain. */
+function parseGrantsChallenge(data: unknown): PullChallenge {
+  if (!isRecord(data)) throw new Error('GrantsChallenge: expected object');
+  const domain = requireString(data, 'domain');
+  if (domain !== ISSUE_GRANT_CHALLENGE_DOMAIN) {
+    throw new Error(
+      `GrantsChallenge.domain must be ${JSON.stringify(ISSUE_GRANT_CHALLENGE_DOMAIN)}, got ${JSON.stringify(domain)}`,
+    );
+  }
+  return {
+    nonce: requireString(data, 'nonce'),
+    expiry: requireString(data, 'expiry'),
+    domain,
+  };
+}
+
+/** §7.5: `200 { grant }` — Bech32m zkgrant string. */
+function parseIssueGrantResult(data: unknown): { grant: string } {
+  if (!isRecord(data)) throw new Error('IssueGrantResult: expected object');
+  const grant = requireString(data, 'grant');
+  return { grant };
 }
 
 function parsePullResult(data: unknown): V1PullResult {

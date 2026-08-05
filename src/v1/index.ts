@@ -78,6 +78,28 @@ export {
   type PullChallenge,
 } from './ownership.js';
 
+export {
+  ATTEST_BALANCE_CHALLENGE_DOMAIN,
+  ATTEST_BALANCE_REQUEST_TAG,
+  ceilingEncoding,
+  attestRequestHash,
+  attestChallengeMessage,
+  buildAttestOwnershipProof,
+} from './attest.js';
+
+export {
+  ISSUE_GRANT_CHALLENGE_DOMAIN,
+  ISSUE_GRANT_REQUEST_TAG,
+  SCOPE_NOT_AFTER_UNBOUNDED,
+  encodeGrantAssetIds,
+  issueGrantRequestHash,
+  buildIssueGrantOwnershipProof,
+  grantScopeToJsonBody,
+  buildGrantProof,
+  type GrantScopeInput,
+  type GrantProofJson,
+} from './grant.js';
+
 export { encodeZkAddress, decodeZkAddress, ZK_ADDRESS_HRP } from './bech32m.js';
 
 export { encodeHexLower, decodeHexExact, bytesEqual } from './hex.js';

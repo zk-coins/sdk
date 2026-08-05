@@ -227,6 +227,8 @@ export {
   computeNip01EventId,
   verifyNip01Event,
   signNip01Event,
+  // §5.2/§7.5 view-grant (Req 9(c)) public scope sentinel (unbounded not_after).
+  SCOPE_NOT_AFTER_UNBOUNDED,
 } from './v1/index.js';
 export type {
   Network,
@@ -268,4 +270,6 @@ export type {
   V1AccountState,
   V1PullResult,
   V1Info,
+  GrantScopeInput,
+  GrantProofJson,
 } from './v1/index.js';

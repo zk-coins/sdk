@@ -1456,9 +1456,9 @@ describe('issueInvoice', () => {
   });
 
   it('rejects wrong-length nkCommit / ivpk', async () => {
-    await expect(
-      issueInvoice({ ...baseParams(), nkCommit: new Uint8Array(31) }),
-    ).rejects.toThrow(/nk_commit/);
+    await expect(issueInvoice({ ...baseParams(), nkCommit: new Uint8Array(31) })).rejects.toThrow(
+      /nk_commit/,
+    );
     await expect(issueInvoice({ ...baseParams(), ivpk: new Uint8Array(16) })).rejects.toThrow(
       /ivpk/,
     );
