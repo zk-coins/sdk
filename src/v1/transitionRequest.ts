@@ -365,8 +365,15 @@ function normalizeIssuance(raw: unknown): Issuance {
     throw new Error('TransitionRequest: issuance.name is required');
   }
   const decimals = field(raw, 'decimals');
-  if (typeof decimals !== 'number' || !Number.isInteger(decimals) || decimals < 0) {
-    throw new Error('TransitionRequest: issuance.decimals must be a non-negative integer');
+  if (
+    typeof decimals !== 'number' ||
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    decimals > 255
+  ) {
+    throw new Error(
+      'TransitionRequest: issuance.decimals must be a non-negative integer <= 255 (u8)',
+    );
   }
   const amount = field(raw, 'amount');
   if (typeof amount !== 'string' || amount.length === 0) {

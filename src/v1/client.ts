@@ -945,6 +945,14 @@ function requireNumber(obj: Record<string, unknown>, key: string): number {
   return v;
 }
 
+function requireCounter(obj: Record<string, unknown>, key: string): number {
+  const v = requireNumber(obj, key);
+  if (!Number.isInteger(v) || v < 0) {
+    throw new Error(`response.${key}: expected non-negative integer`);
+  }
+  return v;
+}
+
 function parseJobStatus(s: string): V1JobStatusValue {
   switch (s) {
     case 'accepted':
@@ -1030,7 +1038,7 @@ function parseAwaitingSignature(data: unknown): AwaitingSignature {
     npk_commit: requireString(data, 'npk_commit'),
     proof_data_hash: requireString(data, 'proof_data_hash'),
     txn_pubkey: requireString(data, 'txn_pubkey'),
-    send_counter: requireNumber(data, 'send_counter'),
+    send_counter: requireCounter(data, 'send_counter'),
   };
 }
 
@@ -1287,7 +1295,7 @@ function parseAccountState(data: unknown): V1AccountState {
   const out: V1AccountState = {
     account_state: requireString(data, 'account_state'),
     state_head: requireString(data, 'state_head'),
-    send_counter: requireNumber(data, 'send_counter'),
+    send_counter: requireCounter(data, 'send_counter'),
     current_pubkey: requireString(data, 'current_pubkey'),
   };
   if (typeof data.head_record_id === 'string') {
@@ -1324,7 +1332,8 @@ function parseInfo(data: unknown): V1Info {
 }
 
 function parseV1ApiError(status: number, rawBody: string): V1ApiError {
-  let machineCode = 'internal_error';
+  // honest default — do not masquerade as a real server machineCode
+  let machineCode = 'unparseable_error_body';
   let message = rawBody;
   try {
     const parsed: unknown = JSON.parse(rawBody);

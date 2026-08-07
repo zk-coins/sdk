@@ -1275,7 +1275,7 @@ describe('ZkCoinsV1Client request surface', () => {
       expect(err).toBeInstanceOf(V1ApiError);
       if (!(err instanceof V1ApiError)) throw err;
       expect(err.status).toBe(502);
-      expect(err.machineCode).toBe('internal_error');
+      expect(err.machineCode).toBe('unparseable_error_body');
       expect(err.message).toMatch(/upstream blew up/);
     }
   });
