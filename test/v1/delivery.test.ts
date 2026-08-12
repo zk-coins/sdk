@@ -943,6 +943,22 @@ describe('addressFromParts / invoiceMessage bounds', () => {
       }),
     ).toThrow(/recipient must be 32 bytes/);
   });
+
+  it('reports invalid when a required byte field is absent at runtime', () => {
+    const z = new Uint8Array(32);
+    const parts = {
+      amount: 1n,
+      recipient: z,
+      pk0: z,
+      nkCommit: z,
+      assetId: z,
+      ivpk: z,
+      opPubkey: z,
+      relays: [] as string[],
+    };
+    Reflect.set(parts, 'recipient', undefined);
+    expect(() => invoiceMessage(parts)).toThrow(/recipient must be 32 bytes, got invalid/);
+  });
 });
 
 describe('parseDeliveryCredential shape rejections', () => {
@@ -1286,6 +1302,49 @@ describe('assertOutputDeliveries address and verify error paths', () => {
       expect(err.code).toBe('verify');
       expect(err.message).toMatch(/output_templates\[0\]\.delivery:/);
     }
+  });
+
+  it('rewraps a non-Error thrown by a caller-supplied pin store', () => {
+    class ThrowingPinStore extends PaymentIdentityPinStore {
+      override check(): never {
+        throw 'pin backend unavailable';
+      }
+    }
+
+    const { invoice, recipient } = buildValidInvoice();
+    expect(() =>
+      assertOutputDeliveries(
+        SELF_SUBJECT,
+        [
+          {
+            recipient,
+            asset_id: ASSET_ID,
+            amount: AMOUNT,
+            delivery: { type: 'invoice', invoice },
+          },
+        ],
+        { network: 'regtest', pinStore: new ThrowingPinStore() },
+      ),
+    ).toThrow(/pin backend unavailable/);
+  });
+});
+
+describe('non-Error values from caller-controlled delivery objects', () => {
+  it('reports a non-Error thrown while reading a profile event', () => {
+    const { event, address } = buildValidProfile();
+    const throwingEvent = new Proxy(event, {
+      get(target, property, receiver) {
+        if (property === 'id') throw 'event id getter failed';
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'profile', event: throwingEvent },
+        { recipient: address, asset_id: ASSET_ID, amount: AMOUNT },
+        { network: 'regtest' },
+      ),
+    ).toThrow(/event id getter failed/);
   });
 });
 

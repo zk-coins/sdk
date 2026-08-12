@@ -242,6 +242,7 @@ function signWithNonceDraws(
     // `return null` covers this arm and the common step-3b redraw (~½ of
     // honest draws). No test seam: forcing k'=0 would mean injecting into the
     // production nonce draw solely for coverage.
+    /* v8 ignore next -- forcing k'=0 would mean injecting into the production nonce draw solely for coverage */
     if (kDrawn !== 0n) {
       let kPrime = kDrawn;
 
@@ -262,9 +263,11 @@ function signWithNonceDraws(
       const t = tweakScalarOrReject(tBytes);
       // int(t) ≥ n → discard (~2^-128). Rule covered by unit tests of
       // {@link tweakScalarOrReject}; a Sign-path seam is the worse answer.
+      /* v8 ignore next -- the int(t) >= n rule is unit-tested directly; a Sign-path seam is the worse answer */
       if (t !== null) {
         // Step 3: R = R' + t·G. t = 0 keeps R = R' (~2^-256); both arms are
         // legal. The rare true-zero edge is not worth a production seam.
+        /* v8 ignore next -- the rare true-zero tweak edge is not worth a production seam */
         const rPoint = t === 0n ? rPrimePoint : rPrimePoint.add(Point.BASE.multiply(t));
         // Step 3b: R = ∞ or y(R) odd → discard and redraw. Never negate R.
         // Rule covered by {@link isAcceptableCommittedR} (odd-y ~½, ∞ ~2^-256).
@@ -278,6 +281,7 @@ function signWithNonceDraws(
           const s = Fn.create(kPrime + t + e * d);
           // s = 0 is a valid field element but rejected as a signature scalar
           // (~2^-256). No injection seam — same rationale as k' = 0 above.
+          /* v8 ignore next -- forcing s=0 needs an injection seam, the same rationale as k'=0 */
           if (s !== 0n) {
             const sBytes = bigintToBytes32(s);
 
@@ -411,6 +415,7 @@ export function verify(input: {
     // s ∈ [1, n) ⇒ s·G ≠ ∞. If rhs were ∞, equals(lhs) is already false
     // (lhs is a non-∞ multiple of G). No separate is0 short-circuit.
     const lhs = Point.BASE.multiply(s);
+    /* v8 ignore next -- a BIP-340 SHA-256 challenge equals zero with probability ~2^-256 and has no production seam */
     const rhs = e === 0n ? R : R.add(P.multiplyUnsafe(e));
     return lhs.equals(rhs);
   } catch {
@@ -445,8 +450,12 @@ export function commVerify(input: { r: Uint8Array; mSc: Uint8Array; rPrime: Uint
     // `equals` is already false when `opened` is ∞. Odd y is likewise rejected
     // by inequality against the even-y commitment.
     return (
+      /* v8 ignore next -- null arm of && is int(t)>=n; unit-tested via tweakScalarOrReject; commVerify has no hash injection seam */
       tInt !== null &&
-      commitment.equals(tInt === 0n ? opening : opening.add(Point.BASE.multiplyUnsafe(tInt)))
+      commitment.equals(
+        /* v8 ignore next -- rare true-zero tweak ~2^-256; not worth a production seam */
+        tInt === 0n ? opening : opening.add(Point.BASE.multiplyUnsafe(tInt)),
+      )
     );
   } catch {
     return false;

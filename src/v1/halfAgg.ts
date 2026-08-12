@@ -221,7 +221,9 @@ export function aggregateVerify(input: {
       const P = liftXOnly(m.pk, `member[${i}].pk`);
       const e = Fn.create(bytesToBigint(taggedHash('BIP0340/challenge', m.r, m.pk, mState)));
       // sig_rhs = R + e·P  (public scalars → multiplyUnsafe; e/a may be 0)
+      /* v8 ignore next -- a SHA-256-derived challenge equals zero with probability ~2^-256 and has no production injection seam */
       const sigRhs = e === 0n ? R : R.add(P.multiplyUnsafe(e));
+      /* v8 ignore next -- a tagged-hash-derived aggregation coefficient equals zero with probability ~2^-256 and has no production injection seam */
       const term = a === 0n ? Point.ZERO : sigRhs.multiplyUnsafe(a);
       rhs = rhsInit ? rhs.add(term) : term;
       rhsInit = true;

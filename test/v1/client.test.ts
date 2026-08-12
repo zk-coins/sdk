@@ -505,20 +505,27 @@ describe('v1 transition flow (msw)', () => {
     );
 
     const client = newClient('testnet');
-    const accepted = await client.submitTransition({
-      kind: 'send',
-      subject: FIXTURE_ZK_ADDRESS,
-      next_pubkey: encodeHexLower(nextPubkey),
-      npk_rand: encodeHexLower(npkRand),
-      input_coins: ['ab'.repeat(32)],
-      output_templates: [
-        {
-          recipient: FIXTURE_ZK_ADDRESS,
-          asset_id: 'cd'.repeat(32),
-          amount: '10',
-        },
-      ],
-    });
+    const accepted = await client.submitTransition(
+      {
+        kind: 'send',
+        subject: FIXTURE_ZK_ADDRESS,
+        next_pubkey: encodeHexLower(nextPubkey),
+        npk_rand: encodeHexLower(npkRand),
+        input_coins: ['ab'.repeat(32)],
+        output_templates: [
+          {
+            recipient: FIXTURE_ZK_ADDRESS,
+            asset_id: 'cd'.repeat(32),
+            amount: '10',
+          },
+        ],
+      },
+      {
+        confirmPinMismatch: false,
+        pinOnFirstUse: false,
+        signal: new AbortController().signal,
+      },
+    );
     expect(accepted.job_id).toBe('job-1');
 
     const waited = await client.waitForAwaitingSignature('job-1', {
@@ -535,7 +542,7 @@ describe('v1 transition flow (msw)', () => {
       awaiting: waited.awaiting_signature!,
       nextPubkey,
       npkRand,
-      nodeNetwork: 'testnet',
+      signal: new AbortController().signal,
     });
 
     expect(job.status).toBe('completed');
@@ -558,6 +565,77 @@ describe('v1 transition flow (msw)', () => {
     expect(signBody.signature).toBe(encodeHexLower(signature.signature));
     expect(signBody.s2c_nonce).toBe(encodeHexLower(signature.s2cNonce));
     expect(polls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('signJob posts and parses a job without an AbortSignal', async () => {
+    const body = { signature: 'aa'.repeat(64), s2c_nonce: 'bb'.repeat(32) };
+    let received: unknown;
+    server.use(
+      http.post(`${BASE}/v1/jobs/job-sign/sign`, async ({ request }) => {
+        received = await request.json();
+        return HttpResponse.json({
+          job_id: 'job-sign',
+          kind: 'send',
+          status: 'publishing',
+          progress: 0.9,
+        });
+      }),
+    );
+
+    const job = await newClient().signJob('job-sign', body);
+    expect(received).toEqual(body);
+    expect(job).toMatchObject({ job_id: 'job-sign', status: 'publishing' });
+  });
+
+  it('signAwaiting accepts an explicit matching node network', () => {
+    const signature = newClient('testnet').signAwaiting({
+      localPubkey: V8_PK1,
+      secretKey: V8_SK1,
+      accountState: { current_pubkey: encodeHexLower(V8_PK1), send_counter: 0 },
+      awaiting,
+      nextPubkey,
+      npkRand,
+      nodeNetwork: 'testnet',
+    });
+
+    expect(
+      verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' }),
+    ).toBe(true);
+  });
+
+  it('refuseOrSignAndSubmit accepts an explicit matching node network', async () => {
+    server.use(
+      http.post(`${BASE}/v1/jobs/job-network/sign`, () =>
+        HttpResponse.json({
+          job_id: 'job-network',
+          kind: 'send',
+          status: 'completed',
+          progress: 1,
+          result: {
+            new_account_state_hash: awaiting.new_account_state_hash,
+            output_coins_root: awaiting.output_coins_root,
+            input_nullifiers_root: awaiting.input_nullifiers_root,
+            output_coin_ids: [],
+          },
+        }),
+      ),
+    );
+
+    const { signature, job } = await newClient('testnet').refuseOrSignAndSubmit({
+      jobId: 'job-network',
+      localPubkey: V8_PK1,
+      secretKey: V8_SK1,
+      accountState: { current_pubkey: encodeHexLower(V8_PK1), send_counter: 0 },
+      awaiting,
+      nextPubkey,
+      npkRand,
+      nodeNetwork: 'testnet',
+    });
+
+    expect(job.status).toBe('completed');
+    expect(
+      verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' }),
+    ).toBe(true);
   });
 
   it('SSE yields status (not phase) and ignores diagnostic phase labels', async () => {
@@ -614,8 +692,29 @@ describe('v1 transition flow (msw)', () => {
         }),
       ),
     );
-    const job = await newClient().cancelJob('job-c');
+    const job = await newClient().cancelJob('job-c', new AbortController().signal);
     expect(job.status).toBe('cancelled');
+  });
+
+  it('cancelJob posts and parses a job without an AbortSignal', async () => {
+    server.use(
+      http.post(`${BASE}/v1/jobs/job-c-no-signal/cancel`, () =>
+        HttpResponse.json({
+          job_id: 'job-c-no-signal',
+          kind: 'send',
+          status: 'cancelled',
+          progress: 0,
+          error: { error: 'cancelled', message: 'cancelled by client' },
+        }),
+      ),
+    );
+
+    const job = await newClient().cancelJob('job-c-no-signal');
+    expect(job).toMatchObject({
+      job_id: 'job-c-no-signal',
+      status: 'cancelled',
+      error: { error: 'cancelled', message: 'cancelled by client' },
+    });
   });
 });
 
@@ -730,11 +829,14 @@ describe('OwnershipProof + pull session', () => {
     );
 
     const client = newClient();
-    const pull = await client.openOwnershipPullSession({
-      subject,
-      sk0: sk0.secretKey,
-      nkCommit,
-    });
+    const pull = await client.openOwnershipPullSession(
+      {
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+      },
+      new AbortController().signal,
+    );
     expect(pull.session).toBe(SESSION_TOKEN);
 
     try {
@@ -967,6 +1069,17 @@ describe('ZkCoinsV1Client request surface', () => {
     await expect(newClient().getJob('j1')).rejects.toThrow(/non-canonical Retry-After/);
   });
 
+  it('getJob parses an accepted job status', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/j1`, () =>
+        HttpResponse.json({ job_id: 'j1', kind: 'send', status: 'accepted', progress: 0 }),
+      ),
+    );
+
+    const { job } = await newClient().getJob('j1');
+    expect(job).toMatchObject({ job_id: 'j1', status: 'accepted', progress: 0 });
+  });
+
   it('getJob parses phase, completed result fields, and failed error body', async () => {
     server.use(
       http.get(`${BASE}/v1/jobs/done`, () =>
@@ -995,7 +1108,7 @@ describe('ZkCoinsV1Client request surface', () => {
         }),
       ),
     );
-    const done = await newClient().getJob('done');
+    const done = await newClient().getJob('done', new AbortController().signal);
     expect(done.job.phase).toBe('published');
     expect(done.job.result?.output_coin_ids).toEqual(['55'.repeat(32)]);
     expect(done.job.result?.publisher_pubkey).toBe('44'.repeat(32));
@@ -1140,7 +1253,7 @@ describe('ZkCoinsV1Client request surface', () => {
   it('streamJob skips comment/empty frames and stops on failed', async () => {
     const frames =
       ': keep-alive\n\n' +
-      'event: phase\ndata: {"status":"proving","progress":0.1}\n\n' +
+      'event: phase\nunknown-field: ignored\ndata: {"status":"proving","progress":0.1}\n\n' +
       'event: error\ndata: {"job_id":"f","kind":"send","status":"failed","progress":0,"error":{"error":"x","message":"y"}}\n\n';
     server.use(
       http.get(
@@ -1187,10 +1300,26 @@ describe('ZkCoinsV1Client request surface', () => {
         }),
       ),
     );
-    const state = await newClient().getAccountState('tok');
+    const state = await newClient().getAccountState('tok', new AbortController().signal);
     expect(state.send_counter).toBe(3);
     expect(state.head_record_id).toBe('rec-1');
     expect(state.last_nullifier).toEqual({ pubkey: 'dd'.repeat(32), r: 'ee'.repeat(32) });
+  });
+
+  it('getAccountState accepts a state without optional head fields', async () => {
+    server.use(
+      http.get(`${BASE}/v1/account/state`, () =>
+        HttpResponse.json({
+          account_state: 'aa'.repeat(32),
+          state_head: 'bb'.repeat(32),
+          send_counter: 0,
+          current_pubkey: 'cc'.repeat(32),
+        }),
+      ),
+    );
+    const state = await newClient().getAccountState('tok');
+    expect(state.head_record_id).toBeUndefined();
+    expect(state.last_nullifier).toBeUndefined();
   });
 
   it('rejects negative and fractional awaiting_signature send_counter values', async () => {
@@ -1325,23 +1454,33 @@ describe('ZkCoinsV1Client request surface', () => {
               blob_id: 'b1',
               occurred_at: '2020-01-01T00:00:00Z',
             },
+            {
+              record_id: 'r2',
+              record_type: 'snapshot',
+              blob_id: 'b2',
+              occurred_at: '2020-01-02T00:00:00Z',
+            },
           ],
           session: 'session-tok',
           session_expiry: '99',
         }),
       ),
     );
-    const pull = await newClient().openPullSession({
-      challenge: { nonce: 'aa'.repeat(32), expiry: '1', domain: PULL_CHALLENGE_DOMAIN },
-      proof: {
-        type: 'ownership',
-        subject: 'zk1x',
-        public_key: 'aa'.repeat(32),
-        nk_commit: 'bb'.repeat(32),
-        signature: 'cc'.repeat(64),
+    const pull = await newClient().openPullSession(
+      {
+        challenge: { nonce: 'aa'.repeat(32), expiry: '1', domain: PULL_CHALLENGE_DOMAIN },
+        proof: {
+          type: 'ownership',
+          subject: 'zk1x',
+          public_key: 'aa'.repeat(32),
+          nk_commit: 'bb'.repeat(32),
+          signature: 'cc'.repeat(64),
+        },
       },
-    });
+      new AbortController().signal,
+    );
     expect(pull.records[0]?.transition_kind).toBe('send');
+    expect(pull.records[1]?.transition_kind).toBeUndefined();
     expect(pull.session).toBe('session-tok');
   });
 
@@ -1359,6 +1498,43 @@ describe('ZkCoinsV1Client request surface', () => {
       expect(err.machineCode).toBe('unparseable_error_body');
       expect(err.message).toMatch(/upstream blew up/);
     }
+  });
+
+  it('JSON error bodies independently default missing error and message fields', async () => {
+    server.use(
+      http.get(`${BASE}/v1/info`, () =>
+        HttpResponse.json({ message: 'human only' }, { status: 502 }),
+      ),
+    );
+    await expect(newClient().info()).rejects.toMatchObject({
+      machineCode: 'unparseable_error_body',
+      message: expect.stringContaining('human only'),
+    });
+
+    server.use(
+      http.get(`${BASE}/v1/info`, () => HttpResponse.json({ error: 'code_only' }, { status: 503 })),
+    );
+    await expect(newClient().info()).rejects.toMatchObject({
+      machineCode: 'code_only',
+      message: expect.stringContaining('{"error":"code_only"}'),
+    });
+  });
+
+  it('redacts a caught V1ApiError with a non-standard message and no raw body', async () => {
+    const token = 'secret-session';
+    const source = new V1ApiError(401, 'unauthorized', 'placeholder');
+    source.message = `upstream leaked ${token} without the SDK prefix`;
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        throw source;
+      },
+    });
+    await expect(client.getAccountState(token)).rejects.toMatchObject({
+      rawBody: undefined,
+      message: expect.not.stringContaining(token),
+    });
   });
 
   it('empty 2xx body parses as an empty object (JobAccepted then fails on fields)', async () => {
@@ -1908,6 +2084,44 @@ describe('ZkCoinsV1Client request surface', () => {
       status: 'completed',
       result: { output_coin_ids: ['aa'.repeat(32)] },
     });
+  });
+
+  it('SSE chooses the earliest boundary when LF and CRLF frames share a buffer', async () => {
+    const completed = {
+      job_id: 'mixed',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: [] as string[],
+      },
+    };
+    const lfFrame = 'event: phase\ndata: {"status":"proving","progress":0.1}\n\n';
+    const crlfFrame = `event: complete\r\ndata: ${JSON.stringify(completed)}\r\n\r\n`;
+
+    for (const [id, frames] of [
+      ['mixed-lf-first', lfFrame + crlfFrame],
+      ['mixed-crlf-first', crlfFrame + lfFrame],
+    ] as const) {
+      server.use(
+        http.get(
+          `${BASE}/v1/jobs/${id}/stream`,
+          () =>
+            new HttpResponse(frames, {
+              status: 200,
+              headers: { 'Content-Type': 'text/event-stream' },
+            }),
+        ),
+      );
+      const seen: string[] = [];
+      for await (const frame of newClient().streamJob(id)) {
+        seen.push(frame.status);
+      }
+      expect(seen).toContain('completed');
+    }
   });
 
   it('SSE phase frame with awaiting_signature but no payload fails closed', async () => {
@@ -2566,7 +2780,10 @@ describe('AttestBalance request surface', () => {
         });
       }),
     );
-    const challenge = await newClient().openAttestBalanceChallenge(subject);
+    const challenge = await newClient().openAttestBalanceChallenge(
+      subject,
+      new AbortController().signal,
+    );
     expect(challenge.nonce).toBe(nonce);
     expect(challenge.expiry).toBe(expiry);
     expect(challenge.domain).toBe(ATTEST_BALANCE_CHALLENGE_DOMAIN);
@@ -2684,14 +2901,17 @@ describe('AttestBalance request surface', () => {
       }),
     );
 
-    const result = await newClient().attestBalance({
-      subject,
-      sk0: sk0.secretKey,
-      nkCommit,
-      assetId,
-      navCeiling,
-      sizeCeiling,
-    });
+    const result = await newClient().attestBalance(
+      {
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        assetId,
+        navCeiling,
+        sizeCeiling,
+      },
+      new AbortController().signal,
+    );
     expect(result.job_id).toBe('attest-job-ceil');
   });
 
@@ -3180,7 +3400,7 @@ describe('ViewGrant request surface', () => {
         });
       }),
     );
-    const challenge = await newClient().openGrantsChallenge(subject);
+    const challenge = await newClient().openGrantsChallenge(subject, new AbortController().signal);
     expect(challenge.nonce).toBe(nonce);
     expect(challenge.expiry).toBe(expiry);
     expect(challenge.domain).toBe(ISSUE_GRANT_CHALLENGE_DOMAIN);
@@ -3304,14 +3524,17 @@ describe('ViewGrant request surface', () => {
       }),
     );
 
-    const result = await newClient().issueViewGrant({
-      subject,
-      sk0: sk0.secretKey,
-      nkCommit,
-      granteePk,
-      scope: { assetIds, notBefore: 100n, notAfter: 200n },
-      grantExpiry,
-    });
+    const result = await newClient().issueViewGrant(
+      {
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        granteePk,
+        scope: { assetIds, notBefore: 100n, notAfter: 200n },
+        grantExpiry,
+      },
+      new AbortController().signal,
+    );
     expect(result.grant).toBe('zkgrant1explicit');
   });
 

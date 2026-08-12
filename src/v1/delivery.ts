@@ -963,6 +963,7 @@ export function assertOutputDeliveries(
   } catch (cause) {
     throw new DeliveryCredentialError(
       'subject',
+      /* v8 ignore next -- decodeZkAddress always throws Error and primitive string operations cannot throw a caller-supplied non-Error */
       `invalid subject address: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
@@ -975,6 +976,7 @@ export function assertOutputDeliveries(
     } catch (cause) {
       throw new DeliveryCredentialError(
         'recipient',
+        /* v8 ignore next -- decodeZkAddress always throws Error and primitive string operations cannot throw a caller-supplied non-Error */
         `output_templates[${i}].recipient invalid: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }

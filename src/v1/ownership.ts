@@ -80,6 +80,7 @@ export function canonicalHostFromApiUrl(apiUrl: string): string {
     const isHttps = url.protocol === 'https:';
     const isHttp = url.protocol === 'http:';
     const defaultPort = isHttps ? '443' : isHttp ? '80' : '';
+    /* v8 ignore next -- WHATWG URL removes explicit HTTP(S) default ports before url.port is read, so a non-empty port cannot equal defaultPort */
     if (port !== defaultPort) {
       return `${host}:${port}`;
     }

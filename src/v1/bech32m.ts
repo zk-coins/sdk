@@ -102,6 +102,7 @@ function convertBits(
     }
   }
   if (pad) {
+    /* v8 ignore next -- encodeZkAddress enforces exactly 32-byte payloads before convertBits(pad:true); 256 bits / 5 leaves remainder 1, never 0 */
     if (bits > 0) {
       ret.push((acc << (to - bits)) & maxv);
     }

@@ -948,6 +948,7 @@ describe('ownership / chan_bind / expiry gates', () => {
     expect(canonicalHostFromApiUrl('http://node.test:80/')).toBe('node.test');
     expect(canonicalHostFromApiUrl('https://node.test:8443/')).toBe('node.test:8443');
     expect(canonicalHostFromApiUrl('http://node.test:8080')).toBe('node.test:8080');
+    expect(canonicalHostFromApiUrl('zkcoins://node.test:1798/path')).toBe('node.test:1798');
     // Trailing dot on hostname
     expect(canonicalHostFromApiUrl('https://node.test./')).toBe('node.test');
     expect(() => canonicalHostFromApiUrl('not a url')).toThrow(/invalid URL/);
@@ -1039,6 +1040,34 @@ describe('ownership / chan_bind / expiry gates', () => {
 // ---------------------------------------------------------------------------
 
 describe('Bech32m zk address rejection paths', () => {
+  it('rejects padding with at least one full input word left over', () => {
+    const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+    const BECH32M_CONST = 0x2bc830a3;
+    const generators = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    const polymod = (values: number[]): number => {
+      let chk = 1;
+      for (const value of values) {
+        const top = chk >>> 25;
+        chk = ((chk & 0x1ffffff) << 5) ^ value;
+        for (let i = 0; i < 5; i += 1) {
+          if ((top >>> i) & 1) chk ^= generators[i]!;
+        }
+      }
+      return chk;
+    };
+    const hrpExpand = (hrp: string): number[] => [
+      ...Array.from(hrp, (char) => char.charCodeAt(0) >>> 5),
+      0,
+      ...Array.from(hrp, (char) => char.charCodeAt(0) & 31),
+    ];
+    const data = Array<number>(49).fill(0);
+    const mod = polymod([...hrpExpand('zk'), ...data, 0, 0, 0, 0, 0, 0]) ^ BECH32M_CONST;
+    const checksum = Array.from({ length: 6 }, (_, i) => (mod >>> (5 * (5 - i))) & 31);
+    const forged = `zk1${[...data, ...checksum].map((value) => CHARSET[value]).join('')}`;
+
+    expect(() => decodeZkAddress(forged)).toThrow(/non-canonical padding/);
+  });
+
   const payload = new Uint8Array(32).fill(0xab);
   const valid = encodeZkAddress(payload);
 
