@@ -196,6 +196,21 @@ export {
   pullChallengeMessage,
   parseExpiryDecimal,
   buildOwnershipProof,
+  ATTEST_BALANCE_CHALLENGE_DOMAIN,
+  ATTEST_BALANCE_REQUEST_TAG,
+  ceilingEncoding,
+  attestRequestHash,
+  attestChallengeMessage,
+  buildAttestOwnershipProof,
+  ISSUE_GRANT_CHALLENGE_DOMAIN,
+  ISSUE_GRANT_REQUEST_TAG,
+  encodeGrantAssetIds,
+  issueGrantRequestHash,
+  buildIssueGrantOwnershipProof,
+  grantScopeToJsonBody,
+  buildGrantProof,
+  // §5.2/§7.5 view-grant public scope sentinel (unbounded not_after).
+  SCOPE_NOT_AFTER_UNBOUNDED,
   freshNpkRand,
   computeNpkCommit,
   encodeZkAddress,
@@ -227,8 +242,6 @@ export {
   computeNip01EventId,
   verifyNip01Event,
   signNip01Event,
-  // §5.2/§7.5 view-grant (Req 9(c)) public scope sentinel (unbounded not_after).
-  SCOPE_NOT_AFTER_UNBOUNDED,
 } from './v1/index.js';
 export type {
   Network,

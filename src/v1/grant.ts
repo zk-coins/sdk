@@ -41,12 +41,18 @@ const U64_MAX = 0xffff_ffff_ffff_ffffn;
 /**
  * Discriminated scope input shared by issueViewGrant and the pull scope echo.
  * Mutually exclusive with `assetIds` when allAssets is true (validated at
- * runtime by encodeGrantAssetIds — a caller passing both is a bug, not a value
- * to silently reconcile).
+ * runtime — a caller passing both is a bug, not a value to silently reconcile).
  */
 export type GrantScopeInput =
   | { allAssets: true; notBefore?: bigint; notAfter?: bigint }
   | { allAssets?: false; assetIds: Uint8Array[]; notBefore?: bigint; notAfter?: bigint };
+
+function assertConsistentAssetScope(scope: GrantScopeInput): void {
+  const assetIds = (scope as { assetIds?: unknown }).assetIds;
+  if (scope.allAssets === true && Array.isArray(assetIds) && assetIds.length > 0) {
+    throw new Error('Grant scope is contradictory: allAssets is true but assetIds is non-empty');
+  }
+}
 
 /**
  * Single place for the server-side defaults in `api/src/grants.rs`
@@ -200,6 +206,8 @@ export function buildIssueGrantOwnershipProof(input: {
   scope: GrantScopeInput;
   grantExpiry: bigint;
 }): OwnershipProofJson {
+  assertConsistentAssetScope(input.scope);
+
   if (input.challenge.domain !== ISSUE_GRANT_CHALLENGE_DOMAIN) {
     throw new Error(
       `buildIssueGrantOwnershipProof: unexpected challenge domain ${JSON.stringify(input.challenge.domain)}; ` +
@@ -261,14 +269,18 @@ export function buildIssueGrantOwnershipProof(input: {
 /**
  * Wire JSON body for the `scope` field shared by `POST /v1/grants` and the
  * PullBody.scope echo. Always emits explicit not_before/not_after (resolved
- * bigints as decimal strings). Does not re-validate ascending order — that is
- * encodeGrantAssetIds's job.
+ * bigints as decimal strings). Explicit asset IDs are fully validated before
+ * they are serialised.
  */
 export function grantScopeToJsonBody(scope: GrantScopeInput): {
   asset_ids: '*' | string[];
   not_before: string;
   not_after: string;
 } {
+  assertConsistentAssetScope(scope);
+  if (scope.allAssets !== true) {
+    encodeGrantAssetIds(false, scope.assetIds);
+  }
   const { notBefore, notAfter } = resolveScopeBounds(scope);
   if (scope.allAssets === true) {
     return {

@@ -600,6 +600,11 @@ export class ZkCoinsV1Client {
     scope?: GrantScopeInput,
     signal?: AbortSignal,
   ): Promise<V1PullResult> {
+    // Fail-closed before the challenge request: malformed scopes must not
+    // cause any network I/O.
+    if (scope !== undefined) {
+      grantScopeToJsonBody(scope);
+    }
     const challenge = await this.openPullChallenge(input.subject, signal);
     const subjectRaw = decodeZkAddress(input.subject);
     const proof = buildGrantProof({
@@ -656,7 +661,6 @@ export class ZkCoinsV1Client {
       assetId: Uint8Array;
       navCeiling?: Uint8Array;
       sizeCeiling?: bigint | number;
-      host: string;
     },
     signal?: AbortSignal,
   ): Promise<{ job_id: string }> {
@@ -669,7 +673,7 @@ export class ZkCoinsV1Client {
       sk0: input.sk0,
       nkCommit: input.nkCommit,
       challenge,
-      host: input.host,
+      host: this.host,
       assetId: input.assetId,
       ...(input.navCeiling !== undefined ? { navCeiling: input.navCeiling } : {}),
       ...(input.sizeCeiling !== undefined ? { sizeCeiling: input.sizeCeiling } : {}),
@@ -740,7 +744,6 @@ export class ZkCoinsV1Client {
       granteePk: Uint8Array;
       scope: GrantScopeInput;
       grantExpiry: bigint;
-      host: string;
     },
     signal?: AbortSignal,
   ): Promise<{ grant: string }> {
@@ -770,7 +773,7 @@ export class ZkCoinsV1Client {
       sk0: input.sk0,
       nkCommit: input.nkCommit,
       challenge,
-      host: input.host,
+      host: this.host,
       granteePk: input.granteePk,
       scope,
       grantExpiry: input.grantExpiry,
@@ -1085,6 +1088,9 @@ function parseJob(data: unknown): V1Job {
     if (!isRecord(resultRaw)) throw new Error('job.result: expected object');
 
     if (kind === 'mint' || kind === 'send' || kind === 'receive') {
+      if ('attestation' in resultRaw) {
+        throw new Error(`job.result: mixed completed result for kind=${kind} includes attestation`);
+      }
       const coinIds = resultRaw.output_coin_ids;
       if (!Array.isArray(coinIds)) {
         throw new Error('job.result.output_coin_ids: expected array');
@@ -1115,7 +1121,20 @@ function parseJob(data: unknown): V1Job {
       }
     } else if (kind === 'attest_balance') {
       // Wire form is exclusively { attestation } (node completed_attest_result;
-      // api validates no transition digest fields). Extra keys are ignored.
+      // api validates no transition digest fields).
+      const transitionResultKeys = [
+        'new_account_state_hash',
+        'output_coins_root',
+        'input_nullifiers_root',
+        'output_coin_ids',
+        'publisher_pubkey',
+      ] as const;
+      const unexpectedKey = transitionResultKeys.find((key) => key in resultRaw);
+      if (unexpectedKey !== undefined) {
+        throw new Error(
+          `job.result: mixed completed result for kind=attest_balance includes ${unexpectedKey}`,
+        );
+      }
       const attestation = requireAttestationHex(resultRaw.attestation, 'job.result.attestation');
       job.result = { attestation };
     } else {
@@ -1234,6 +1253,9 @@ function parseAttestBalanceChallenge(data: unknown): PullChallenge {
 function parseAttestBalanceAccepted(data: unknown): { job_id: string } {
   if (!isRecord(data)) throw new Error('AttestBalanceAccepted: expected object');
   const job_id = requireString(data, 'job_id');
+  if (job_id.length === 0) {
+    throw new Error('AttestBalanceAccepted.job_id is empty');
+  }
   return { job_id };
 }
 
@@ -1257,6 +1279,9 @@ function parseGrantsChallenge(data: unknown): PullChallenge {
 function parseIssueGrantResult(data: unknown): { grant: string } {
   if (!isRecord(data)) throw new Error('IssueGrantResult: expected object');
   const grant = requireString(data, 'grant');
+  if (grant.length === 0) {
+    throw new Error('IssueGrantResult.grant is empty');
+  }
   return { grant };
 }
 

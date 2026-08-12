@@ -51,6 +51,7 @@ import {
   assertTransitionRequest,
   type TransitionRequest,
   type AwaitingSignature,
+  type GrantScopeInput,
   type ProofData,
   type ZkCoinsV1ClientOptions,
   type PullChallenge,
@@ -223,6 +224,29 @@ describe('TransitionRequest presence matrix', () => {
         output_templates: [{ recipient: base.subject, asset_id: 'dd'.repeat(32), amount: '1' }],
       }),
     ).toThrow(/issuance/);
+  });
+
+  it('accepts issuance decimals at the u8 maximum and rejects overflow', () => {
+    const mint = {
+      kind: 'mint',
+      ...base,
+      output_templates: [{ recipient: base.subject, asset_id: 'dd'.repeat(32), amount: '1' }],
+      issuance: {
+        name: 'Boundary asset',
+        decimals: 255,
+        issuance_version: 1,
+        amount: '1',
+        creator_pubkey: 'ee'.repeat(32),
+      },
+    };
+
+    expect(assertTransitionRequest(mint)).toMatchObject({ issuance: { decimals: 255 } });
+    expect(() =>
+      assertTransitionRequest({
+        ...mint,
+        issuance: { ...mint.issuance, decimals: 256 },
+      }),
+    ).toThrow(/decimals must be a non-negative integer <= 255/);
   });
 
   it('runtime-rejects receive without fold_coin_ids', () => {
@@ -1169,6 +1193,63 @@ describe('ZkCoinsV1Client request surface', () => {
     expect(state.last_nullifier).toEqual({ pubkey: 'dd'.repeat(32), r: 'ee'.repeat(32) });
   });
 
+  it('rejects negative and fractional awaiting_signature send_counter values', async () => {
+    for (const [suffix, sendCounter] of [
+      ['negative', -1],
+      ['fractional', 0.5],
+    ] as const) {
+      const jobId = `bad-await-counter-${suffix}`;
+      server.use(
+        http.get(`${BASE}/v1/jobs/${jobId}`, () =>
+          HttpResponse.json({
+            job_id: jobId,
+            kind: 'send',
+            status: 'awaiting_signature',
+            progress: 0.5,
+            awaiting_signature: {
+              ...awaitingFromProofData(V8_PD),
+              send_counter: sendCounter,
+            },
+          }),
+        ),
+      );
+      await expect(newClient().getJob(jobId)).rejects.toThrow(/expected non-negative integer/);
+    }
+  });
+
+  it('rejects negative and fractional account-state send_counter values', async () => {
+    for (const sendCounter of [-1, 0.5]) {
+      server.use(
+        http.get(`${BASE}/v1/account/state`, () =>
+          HttpResponse.json({
+            account_state: 'aa'.repeat(32),
+            state_head: 'bb'.repeat(32),
+            send_counter: sendCounter,
+            current_pubkey: 'cc'.repeat(32),
+          }),
+        ),
+      );
+      await expect(newClient().getAccountState('tok')).rejects.toThrow(
+        /expected non-negative integer/,
+      );
+    }
+  });
+
+  it('accepts fractional progress while send_counter remains integer-only', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/fractional-progress`, () =>
+        HttpResponse.json({
+          job_id: 'fractional-progress',
+          kind: 'send',
+          status: 'proving',
+          progress: 0.5,
+        }),
+      ),
+    );
+    const { job } = await newClient().getJob('fractional-progress');
+    expect(job.progress).toBe(0.5);
+  });
+
   it('getAccountState rejects a malformed last_nullifier', async () => {
     server.use(
       http.get(`${BASE}/v1/account/state`, () =>
@@ -1788,33 +1869,6 @@ describe('ZkCoinsV1Client request surface', () => {
     expect(job.kind).toBe('attest_balance');
     expect(job.result?.attestation).toBe('ff'.repeat(16));
     expect(job.result?.new_account_state_hash).toBeUndefined();
-
-    // Stray transition fields on attest_balance are ignored (not copied).
-    // Real server never co-sends digests with attestation (api
-    // validate_job_result_for_kind); parser keeps only { attestation }.
-    server.use(
-      http.get(`${BASE}/v1/jobs/digest-attest-with`, () =>
-        HttpResponse.json({
-          job_id: 'digest-attest-with',
-          kind: 'attest_balance',
-          status: 'completed',
-          progress: 1,
-          result: {
-            new_account_state_hash: ash,
-            output_coins_root: ocr,
-            input_nullifiers_root: inr,
-            output_coin_ids: [],
-            attestation: 'ee'.repeat(8),
-          },
-        }),
-      ),
-    );
-    const withDigests = await newClient().getJob('digest-attest-with');
-    expect(withDigests.job.result?.attestation).toBe('ee'.repeat(8));
-    expect(withDigests.job.result?.new_account_state_hash).toBeUndefined();
-    expect(withDigests.job.result?.output_coins_root).toBeUndefined();
-    expect(withDigests.job.result?.input_nullifiers_root).toBeUndefined();
-    expect(withDigests.job.result?.output_coin_ids).toBeUndefined();
   });
 
   it('SSE frames delimited by CRLF are processed (not only LF)', async () => {
@@ -2449,6 +2503,9 @@ describe('AttestBalance request surface', () => {
     expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
       true,
     );
+    expect(proof.public_key).toBe(encodeHexLower(sk0.publicKey));
+    expect(proof.subject).toBe(subject);
+    expect(proof.nk_commit).toBe(encodeHexLower(nkCommit));
     expect(proof.type).toBe('ownership');
   });
 
@@ -2485,6 +2542,9 @@ describe('AttestBalance request surface', () => {
     expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
       true,
     );
+    expect(proof.public_key).toBe(encodeHexLower(sk0.publicKey));
+    expect(proof.subject).toBe(subject);
+    expect(proof.nk_commit).toBe(encodeHexLower(nkCommit));
   });
 
   // ---- 4. HTTP-level (msw) ----
@@ -2589,7 +2649,6 @@ describe('AttestBalance request surface', () => {
       sk0: sk0.secretKey,
       nkCommit,
       assetId,
-      host,
     });
     expect(result.job_id).toBe('attest-job-1');
     expect(posted).toBeDefined();
@@ -2632,7 +2691,6 @@ describe('AttestBalance request surface', () => {
       assetId,
       navCeiling,
       sizeCeiling,
-      host,
     });
     expect(result.job_id).toBe('attest-job-ceil');
   });
@@ -2647,7 +2705,6 @@ describe('AttestBalance request surface', () => {
         nkCommit,
         assetId,
         navCeiling: new Uint8Array(32).fill(1),
-        host,
       }),
     ).rejects.toThrow(/both be present or both omitted/);
 
@@ -2658,7 +2715,6 @@ describe('AttestBalance request surface', () => {
         nkCommit,
         assetId,
         sizeCeiling: 1n,
-        host,
       }),
     ).rejects.toThrow(/both be present or both omitted/);
   });
@@ -2687,9 +2743,31 @@ describe('AttestBalance request surface', () => {
         sk0: sk0.secretKey,
         nkCommit,
         assetId,
-        host,
       }),
     ).rejects.toThrow(/AttestBalanceAccepted: expected object/);
+  });
+
+  it('parseAttestBalanceAccepted rejects an empty job_id', async () => {
+    server.use(
+      http.post(`${BASE}/v1/attest/balance/challenge`, () =>
+        HttpResponse.json({
+          nonce: '12'.repeat(32),
+          expiry: '1',
+          domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/attest/balance`, () =>
+        HttpResponse.json({ job_id: '' }, { status: 202 }),
+      ),
+    );
+    await expect(
+      newClient().attestBalance({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        assetId,
+      }),
+    ).rejects.toThrow(/AttestBalanceAccepted\.job_id is empty/);
   });
 });
 
@@ -2800,6 +2878,25 @@ describe('ViewGrant request surface', () => {
     expect(() => encodeGrantAssetIds(false, [high, low])).toThrow(/strictly ascending/);
   });
 
+  it('grantScopeToJsonBody rejects contradictory and malformed asset scopes', () => {
+    const id = new Uint8Array(32).fill(0x05);
+    const contradictoryScope = {
+      allAssets: true,
+      assetIds: [id],
+    } as unknown as GrantScopeInput;
+    expect(() => grantScopeToJsonBody(contradictoryScope)).toThrow(/allAssets.*assetIds/);
+    expect(() => grantScopeToJsonBody({ assetIds: [] })).toThrow(/must be non-empty when not "\*"/);
+    expect(() => grantScopeToJsonBody({ assetIds: [new Uint8Array(16)] })).toThrow(
+      /asset_ids\[0\] must be 32 bytes/,
+    );
+    expect(() => grantScopeToJsonBody({ assetIds: [id, id] })).toThrow(/strictly ascending/);
+    expect(() =>
+      grantScopeToJsonBody({
+        assetIds: [new Uint8Array(32).fill(0x09), new Uint8Array(32).fill(0x01)],
+      }),
+    ).toThrow(/strictly ascending/);
+  });
+
   it('issueGrantRequestHash rejects wrong 32-byte fields and out-of-range u64', () => {
     const ok32 = new Uint8Array(32);
     const assetEnc = encodeGrantAssetIds(true, []);
@@ -2877,6 +2974,30 @@ describe('ViewGrant request surface', () => {
         grantExpiry,
       }),
     ).toThrow(/grantee_pk must be 32 bytes/);
+  });
+
+  it('buildIssueGrantOwnershipProof rejects a contradictory asset scope', () => {
+    const challenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+    };
+    const contradictoryScope = {
+      allAssets: true,
+      assetIds: [new Uint8Array(32)],
+    } as unknown as GrantScopeInput;
+    expect(() =>
+      buildIssueGrantOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge,
+        host,
+        granteePk,
+        scope: contradictoryScope,
+        grantExpiry,
+      }),
+    ).toThrow(/allAssets.*assetIds/);
   });
 
   it('buildGrantProof rejects wrong domain, empty grant, and bad subject length', () => {
@@ -2959,6 +3080,9 @@ describe('ViewGrant request surface', () => {
     expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
       true,
     );
+    expect(proof.public_key).toBe(encodeHexLower(sk0.publicKey));
+    expect(proof.subject).toBe(subject);
+    expect(proof.nk_commit).toBe(encodeHexLower(nkCommit));
     expect(proof.type).toBe('ownership');
   });
 
@@ -3002,6 +3126,9 @@ describe('ViewGrant request surface', () => {
     expect(schnorr.verify(hexToBytes(proof.signature), chal, hexToBytes(proof.public_key))).toBe(
       true,
     );
+    expect(proof.public_key).toBe(encodeHexLower(sk0.publicKey));
+    expect(proof.subject).toBe(subject);
+    expect(proof.nk_commit).toBe(encodeHexLower(nkCommit));
   });
 
   it('GrantProof verifies under BIP-340 over plain pull chal', () => {
@@ -3139,7 +3266,6 @@ describe('ViewGrant request surface', () => {
       granteePk,
       scope: { allAssets: true },
       grantExpiry,
-      host,
     });
     expect(result.grant).toBe(OPAQUE_GRANT);
     expect(posted).toBeDefined();
@@ -3185,7 +3311,6 @@ describe('ViewGrant request surface', () => {
       granteePk,
       scope: { assetIds, notBefore: 100n, notAfter: 200n },
       grantExpiry,
-      host,
     });
     expect(result.grant).toBe('zkgrant1explicit');
   });
@@ -3201,7 +3326,6 @@ describe('ViewGrant request surface', () => {
         granteePk,
         scope: { assetIds: [] },
         grantExpiry,
-        host,
       }),
     ).rejects.toThrow(/must be non-empty when not "\*"/);
 
@@ -3214,7 +3338,6 @@ describe('ViewGrant request surface', () => {
         granteePk,
         scope: { assetIds: unsorted },
         grantExpiry,
-        host,
       }),
     ).rejects.toThrow(/strictly ascending/);
   });
@@ -3245,9 +3368,31 @@ describe('ViewGrant request surface', () => {
         granteePk,
         scope: { allAssets: true },
         grantExpiry,
-        host,
       }),
     ).rejects.toThrow(/IssueGrantResult: expected object/);
+  });
+
+  it('parseIssueGrantResult rejects an empty grant', async () => {
+    server.use(
+      http.post(`${BASE}/v1/grants/challenge`, () =>
+        HttpResponse.json({
+          nonce: '34'.repeat(32),
+          expiry: '1',
+          domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/grants`, () => HttpResponse.json({ grant: '' })),
+    );
+    await expect(
+      newClient().issueViewGrant({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        granteePk,
+        scope: { allAssets: true },
+        grantExpiry,
+      }),
+    ).rejects.toThrow(/IssueGrantResult\.grant is empty/);
   });
 
   it('openGrantPullSession posts challenge then pull with GrantProof; no scope when omitted', async () => {
@@ -3344,6 +3489,37 @@ describe('ViewGrant request surface', () => {
     expect(pull.session).toBe('grant-scope-session');
   });
 
+  it('openPullSession rejects a malformed scope before any network call', async () => {
+    // No handlers registered: the validation error must occur before fetch.
+    const badScope = {
+      assetIds: [new Uint8Array(32).fill(0x09), new Uint8Array(32).fill(0x01)],
+    };
+    await expect(
+      newClient().openPullSession({
+        challenge: DUMMY_CHALLENGE,
+        proof: DUMMY_OWNERSHIP_PROOF,
+        scope: badScope,
+      }),
+    ).rejects.toThrow(/strictly ascending/);
+  });
+
+  it('openGrantPullSession rejects a malformed scope before any network call', async () => {
+    // No handlers registered: even the challenge endpoint must not be called.
+    const badScope = {
+      assetIds: [new Uint8Array(32).fill(0x09), new Uint8Array(32).fill(0x01)],
+    };
+    await expect(
+      newClient().openGrantPullSession(
+        {
+          subject,
+          grant: OPAQUE_GRANT,
+          granteeSecret: grantee.secretKey,
+        },
+        badScope,
+      ),
+    ).rejects.toThrow(/strictly ascending/);
+  });
+
   it('constants match Rust ownership.rs literals', () => {
     expect(ISSUE_GRANT_CHALLENGE_DOMAIN).toBe('zkCoins/v1/IssueGrantChallenge');
     expect(ISSUE_GRANT_REQUEST_TAG).toBe('zkCoins/v1/IssueGrant');
@@ -3377,6 +3553,49 @@ describe('ViewGrant request surface', () => {
     expect(job.result?.output_coin_ids).toBeUndefined();
     expect(job.result?.new_account_state_hash).toBeUndefined();
     expect(job.result?.publisher_pubkey).toBeUndefined();
+  });
+
+  it('getJob rejects attest_balance results mixed with transition fields', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/attest-mixed`, () =>
+        HttpResponse.json({
+          job_id: 'attest-mixed',
+          kind: 'attest_balance',
+          status: 'completed',
+          progress: 1,
+          result: {
+            attestation: 'ab'.repeat(40),
+            output_coin_ids: [],
+          },
+        }),
+      ),
+    );
+    await expect(newClient().getJob('attest-mixed')).rejects.toThrow(
+      /mixed completed result.*output_coin_ids/,
+    );
+  });
+
+  it('getJob rejects transition results mixed with an attestation', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/mint-mixed`, () =>
+        HttpResponse.json({
+          job_id: 'mint-mixed',
+          kind: 'mint',
+          status: 'completed',
+          progress: 1,
+          result: {
+            new_account_state_hash: '11'.repeat(32),
+            output_coins_root: '22'.repeat(32),
+            input_nullifiers_root: '33'.repeat(32),
+            output_coin_ids: [],
+            attestation: 'ab'.repeat(40),
+          },
+        }),
+      ),
+    );
+    await expect(newClient().getJob('mint-mixed')).rejects.toThrow(
+      /mixed completed result.*attestation/,
+    );
   });
 
   it('getJob rejects completed job with unknown kind', async () => {

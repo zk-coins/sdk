@@ -8,9 +8,39 @@
  * `TxDetailSchema` missing from the value-export block.
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import * as sdk from '../src/index.js';
+import * as v1index from '../src/v1/index.js';
+
+function namedExports(source: string): Array<{
+  typeOnlyBlock: boolean;
+  modulePath: string;
+  entries: Array<{ name: string; typeOnly: boolean }>;
+}> {
+  const blocks: Array<{
+    typeOnlyBlock: boolean;
+    modulePath: string;
+    entries: Array<{ name: string; typeOnly: boolean }>;
+  }> = [];
+  const pattern = /export\s+(type\s+)?\{([\s\S]*?)\}\s+from\s+['"]([^'"]+)['"];/g;
+  for (const match of source.matchAll(pattern)) {
+    const typeOnlyBlock = match[1] !== undefined;
+    const entries = match[2]!
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+      .map((entry) => {
+        const typeOnly = typeOnlyBlock || entry.startsWith('type ');
+        const withoutType = entry.replace(/^type\s+/, '');
+        const name = withoutType.split(/\s+as\s+/)[0]!;
+        return { name, typeOnly };
+      });
+    blocks.push({ typeOnlyBlock, modulePath: match[3]!, entries });
+  }
+  return blocks;
+}
 
 describe('package barrel exports', () => {
   it('re-exports the history + tx-detail Zod schemas as runtime values', () => {
@@ -45,6 +75,36 @@ describe('package barrel exports', () => {
     ] as const) {
       expect(sdk[name], `${name} must be exported from the package root`).toBeDefined();
       expect(typeof sdk[name]).toBe('function');
+    }
+  });
+
+  it('re-exports every v1 runtime value from the package root', () => {
+    for (const name of Object.keys(v1index)) {
+      expect(
+        (sdk as Record<string, unknown>)[name],
+        `${name} must be exported from the package root`,
+      ).toBeDefined();
+    }
+  });
+
+  it('re-exports every v1 named type from the package root', () => {
+    const v1Source = readFileSync(new URL('../src/v1/index.ts', import.meta.url), 'utf8');
+    const rootSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+    const v1Types = namedExports(v1Source)
+      .flatMap((block) => block.entries)
+      .filter((entry) => entry.typeOnly)
+      .map((entry) => entry.name);
+    const rootV1Types = new Set(
+      namedExports(rootSource)
+        .filter((block) => block.typeOnlyBlock && block.modulePath === './v1/index.js')
+        .flatMap((block) => block.entries)
+        .map((entry) => entry.name),
+    );
+
+    for (const name of v1Types) {
+      expect(rootV1Types.has(name), `${name} type must be exported from the package root`).toBe(
+        true,
+      );
     }
   });
 
