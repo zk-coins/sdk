@@ -1307,6 +1307,7 @@ describe('assertOutputDeliveries address and verify error paths', () => {
   it('rewraps a non-Error thrown by a caller-supplied pin store', () => {
     class ThrowingPinStore extends PaymentIdentityPinStore {
       override check(): never {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- fixture: production must wrap non-Error throws
         throw 'pin backend unavailable';
       }
     }
@@ -1334,6 +1335,7 @@ describe('non-Error values from caller-controlled delivery objects', () => {
     const { event, address } = buildValidProfile();
     const throwingEvent = new Proxy(event, {
       get(target, property, receiver) {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- fixture: production must wrap non-Error throws
         if (property === 'id') throw 'event id getter failed';
         return Reflect.get(target, property, receiver) as unknown;
       },

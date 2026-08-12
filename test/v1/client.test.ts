@@ -598,9 +598,9 @@ describe('v1 transition flow (msw)', () => {
       nodeNetwork: 'testnet',
     });
 
-    expect(
-      verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' }),
-    ).toBe(true);
+    expect(verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' })).toBe(
+      true,
+    );
   });
 
   it('refuseOrSignAndSubmit accepts an explicit matching node network', async () => {
@@ -633,9 +633,9 @@ describe('v1 transition flow (msw)', () => {
     });
 
     expect(job.status).toBe('completed');
-    expect(
-      verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' }),
-    ).toBe(true);
+    expect(verify({ publicKey: V8_PK1, signature: signature.signature, network: 'testnet' })).toBe(
+      true,
+    );
   });
 
   it('SSE yields status (not phase) and ignores diagnostic phase labels', async () => {
@@ -1286,6 +1286,29 @@ describe('ZkCoinsV1Client request surface', () => {
     await expect(newClient().openPullChallenge('zk1x')).rejects.toThrow(/PullChallenge\.domain/);
   });
 
+  it('openPullChallenge rejects non-canonical nonce and expiry', async () => {
+    const badCases: Array<{ nonce: string; expiry: string; re: RegExp }> = [
+      { nonce: '', expiry: '1', re: /PullChallenge\.nonce.*expected 64 hex chars/ },
+      { nonce: 'a'.repeat(63), expiry: '1', re: /PullChallenge\.nonce.*expected 64 hex chars/ },
+      { nonce: 'AA'.repeat(32), expiry: '1', re: /PullChallenge\.nonce.*non-canonical hex/ },
+      { nonce: 'aa'.repeat(16), expiry: '1', re: /PullChallenge\.nonce.*expected 64 hex chars/ },
+      { nonce: 'aa'.repeat(32), expiry: '01', re: /leading zeros are not allowed/ },
+      { nonce: 'aa'.repeat(32), expiry: '12a', re: /not a canonical u64 decimal/ },
+    ];
+    for (const c of badCases) {
+      server.use(
+        http.post(`${BASE}/v1/pull/challenge`, () =>
+          HttpResponse.json({
+            nonce: c.nonce,
+            expiry: c.expiry,
+            domain: PULL_CHALLENGE_DOMAIN,
+          }),
+        ),
+      );
+      await expect(newClient().openPullChallenge('zk1x')).rejects.toThrow(c.re);
+    }
+  });
+
   it('getAccountState requires a token and parses optional fields', async () => {
     await expect(newClient().getAccountState('')).rejects.toThrow(/session token is required/);
     server.use(
@@ -1506,18 +1529,36 @@ describe('ZkCoinsV1Client request surface', () => {
         HttpResponse.json({ message: 'human only' }, { status: 502 }),
       ),
     );
-    await expect(newClient().info()).rejects.toMatchObject({
-      machineCode: 'unparseable_error_body',
-      message: expect.stringContaining('human only'),
-    });
+    const err1 = await newClient()
+      .info()
+      .then(
+        () => {
+          throw new Error('expected reject');
+        },
+        (e: unknown) => e,
+      );
+    expect(err1).toBeInstanceOf(V1ApiError);
+    if (!(err1 instanceof V1ApiError)) throw err1;
+    expect(err1.status).toBe(502);
+    expect(err1.machineCode).toBe('unparseable_error_body');
+    expect(err1.message).toContain('human only');
 
     server.use(
       http.get(`${BASE}/v1/info`, () => HttpResponse.json({ error: 'code_only' }, { status: 503 })),
     );
-    await expect(newClient().info()).rejects.toMatchObject({
-      machineCode: 'code_only',
-      message: expect.stringContaining('{"error":"code_only"}'),
-    });
+    const err2 = await newClient()
+      .info()
+      .then(
+        () => {
+          throw new Error('expected reject');
+        },
+        (e: unknown) => e,
+      );
+    expect(err2).toBeInstanceOf(V1ApiError);
+    if (!(err2 instanceof V1ApiError)) throw err2;
+    expect(err2.status).toBe(503);
+    expect(err2.machineCode).toBe('code_only');
+    expect(err2.message).toContain('{"error":"code_only"}');
   });
 
   it('redacts a caught V1ApiError with a non-standard message and no raw body', async () => {
@@ -1531,10 +1572,16 @@ describe('ZkCoinsV1Client request surface', () => {
         throw source;
       },
     });
-    await expect(client.getAccountState(token)).rejects.toMatchObject({
-      rawBody: undefined,
-      message: expect.not.stringContaining(token),
-    });
+    const err = await client.getAccountState(token).then(
+      () => {
+        throw new Error('expected reject');
+      },
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(V1ApiError);
+    if (!(err instanceof V1ApiError)) throw err;
+    expect(err.rawBody).toBeUndefined();
+    expect(err.message).not.toContain(token);
   });
 
   it('empty 2xx body parses as an empty object (JobAccepted then fails on fields)', async () => {
@@ -2818,6 +2865,45 @@ describe('AttestBalance request surface', () => {
     );
   });
 
+  it('openAttestBalanceChallenge rejects non-canonical nonce and expiry', async () => {
+    const badCases: Array<{ nonce: string; expiry: string; re: RegExp }> = [
+      {
+        nonce: '',
+        expiry: '1700000080',
+        re: /AttestBalanceChallenge\.nonce.*expected 64 hex chars/,
+      },
+      {
+        nonce: 'a'.repeat(63),
+        expiry: '1700000080',
+        re: /AttestBalanceChallenge\.nonce.*expected 64 hex chars/,
+      },
+      {
+        nonce: 'AA'.repeat(32),
+        expiry: '1700000080',
+        re: /AttestBalanceChallenge\.nonce.*non-canonical hex/,
+      },
+      {
+        nonce: 'aa'.repeat(16),
+        expiry: '1700000080',
+        re: /AttestBalanceChallenge\.nonce.*expected 64 hex chars/,
+      },
+      { nonce: 'dd'.repeat(32), expiry: '01', re: /leading zeros are not allowed/ },
+      { nonce: 'dd'.repeat(32), expiry: '12a', re: /not a canonical u64 decimal/ },
+    ];
+    for (const c of badCases) {
+      server.use(
+        http.post(`${BASE}/v1/attest/balance/challenge`, () =>
+          HttpResponse.json({
+            nonce: c.nonce,
+            expiry: c.expiry,
+            domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+          }),
+        ),
+      );
+      await expect(newClient().openAttestBalanceChallenge(subject)).rejects.toThrow(c.re);
+    }
+  });
+
   it('attestBalance full flow without ceilings: body omits ceilings, 202 { job_id } only', async () => {
     const nonce = 'ee'.repeat(32);
     const expiry = '1700000090';
@@ -3433,6 +3519,41 @@ describe('ViewGrant request surface', () => {
     await expect(newClient().openGrantsChallenge(subject)).rejects.toThrow(
       /GrantsChallenge: expected object/,
     );
+  });
+
+  it('openGrantsChallenge rejects non-canonical nonce and expiry', async () => {
+    const badCases: Array<{ nonce: string; expiry: string; re: RegExp }> = [
+      { nonce: '', expiry: '1700000080', re: /GrantsChallenge\.nonce.*expected 64 hex chars/ },
+      {
+        nonce: 'a'.repeat(63),
+        expiry: '1700000080',
+        re: /GrantsChallenge\.nonce.*expected 64 hex chars/,
+      },
+      {
+        nonce: 'AA'.repeat(32),
+        expiry: '1700000080',
+        re: /GrantsChallenge\.nonce.*non-canonical hex/,
+      },
+      {
+        nonce: 'aa'.repeat(16),
+        expiry: '1700000080',
+        re: /GrantsChallenge\.nonce.*expected 64 hex chars/,
+      },
+      { nonce: 'ee'.repeat(32), expiry: '01', re: /leading zeros are not allowed/ },
+      { nonce: 'ee'.repeat(32), expiry: '12a', re: /not a canonical u64 decimal/ },
+    ];
+    for (const c of badCases) {
+      server.use(
+        http.post(`${BASE}/v1/grants/challenge`, () =>
+          HttpResponse.json({
+            nonce: c.nonce,
+            expiry: c.expiry,
+            domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+          }),
+        ),
+      );
+      await expect(newClient().openGrantsChallenge(subject)).rejects.toThrow(c.re);
+    }
   });
 
   it('issueViewGrant full flow with allAssets: scope "*", explicit not_before/not_after', async () => {

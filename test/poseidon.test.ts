@@ -335,6 +335,35 @@ describe('encodeDigest', () => {
     const d = [1n, 2n, 3n, 4n] as const;
     expect(encodeDigest(d)).toEqual(d);
   });
+
+  it('rejects digests with wrong limb count', () => {
+    const tooLong = [1n, 2n, 3n, 4n, 5n] as unknown as Digest;
+    const tooShort = [1n, 2n, 3n] as unknown as Digest;
+    const notArray = { 0: 1n, 1: 2n, 2: 3n, 3: 4n } as unknown as Digest;
+    for (const forged of [tooLong, tooShort, notArray]) {
+      try {
+        encodeDigest(forged);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(EncodingError);
+        expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+      }
+    }
+  });
+
+  it('rejects a digest limb that is not a bigint', () => {
+    const forged = [0n, 0n, 0n, 'x'] as unknown as Digest;
+    try {
+      encodeDigest(forged);
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EncodingError);
+      const e = err as EncodingError;
+      expect(e.kind).toBe('NonCanonicalDigestLimb');
+      expect(e.details.limbIndex).toBe(3);
+      expect(e.details.value).toBe('x');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -672,6 +701,9 @@ describe('hash helper argument checks', () => {
     expect(() => nflogRoot(1n << 64n, d)).toThrow(/u64/);
     expect(digestToHex(coinhistLeafHash(1)).length).toBe(64);
     expect(digestToHex(coinhistLeafHash(2)).length).toBe(64);
+    expect(() => coinhistLeafHash(3 as 0)).toThrow(RangeError);
+    expect(() => coinhistLeafHash(1.5 as 0)).toThrow(RangeError);
+    expect(() => coinhistLeafHash(-1 as 0)).toThrow(RangeError);
     expect(() => coinhistNodeHash(257, d, d)).toThrow(/0\.\.=256/);
     expect(() => coinhistNodeHash(-1, d, d)).toThrow(/0\.\.=256/);
     expect(digestToHex(coinhistNodeHash(0, d, d)).length).toBe(64);

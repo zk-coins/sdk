@@ -50,6 +50,7 @@ import type { Network } from './mstate.js';
 import {
   buildOwnershipProof,
   canonicalHostFromApiUrl,
+  parseExpiryDecimal,
   type OwnershipProofJson,
   type PullChallenge,
   PULL_CHALLENGE_DOMAIN,
@@ -1223,11 +1224,11 @@ function parsePullChallenge(data: unknown): PullChallenge {
       `PullChallenge.domain must be ${JSON.stringify(PULL_CHALLENGE_DOMAIN)}, got ${JSON.stringify(domain)}`,
     );
   }
-  return {
-    nonce: requireString(data, 'nonce'),
-    expiry: requireString(data, 'expiry'),
-    domain,
-  };
+  const nonce = requireString(data, 'nonce');
+  decodeHexExact(nonce, 32, 'PullChallenge.nonce');
+  const expiry = requireString(data, 'expiry');
+  parseExpiryDecimal(expiry);
+  return { nonce, expiry, domain };
 }
 
 /** AttestBalance challenge response — same fields as PullChallenge, own domain. */
@@ -1239,11 +1240,11 @@ function parseAttestBalanceChallenge(data: unknown): PullChallenge {
       `AttestBalanceChallenge.domain must be ${JSON.stringify(ATTEST_BALANCE_CHALLENGE_DOMAIN)}, got ${JSON.stringify(domain)}`,
     );
   }
-  return {
-    nonce: requireString(data, 'nonce'),
-    expiry: requireString(data, 'expiry'),
-    domain,
-  };
+  const nonce = requireString(data, 'nonce');
+  decodeHexExact(nonce, 32, 'AttestBalanceChallenge.nonce');
+  const expiry = requireString(data, 'expiry');
+  parseExpiryDecimal(expiry);
+  return { nonce, expiry, domain };
 }
 
 /**
@@ -1268,11 +1269,11 @@ function parseGrantsChallenge(data: unknown): PullChallenge {
       `GrantsChallenge.domain must be ${JSON.stringify(ISSUE_GRANT_CHALLENGE_DOMAIN)}, got ${JSON.stringify(domain)}`,
     );
   }
-  return {
-    nonce: requireString(data, 'nonce'),
-    expiry: requireString(data, 'expiry'),
-    domain,
-  };
+  const nonce = requireString(data, 'nonce');
+  decodeHexExact(nonce, 32, 'GrantsChallenge.nonce');
+  const expiry = requireString(data, 'expiry');
+  parseExpiryDecimal(expiry);
+  return { nonce, expiry, domain };
 }
 
 /** §7.5: `200 { grant }` — Bech32m zkgrant string. */

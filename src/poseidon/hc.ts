@@ -119,13 +119,21 @@ export function encodeDigest(d: Digest): readonly [bigint, bigint, bigint, bigin
 
 /** Fail-closed: every limb of a digest input must be in `[0, p)`. */
 function assertCanonicalDigest(d: Digest, label: string): void {
+  const limbs: readonly unknown[] = d;
+  if (limbs.length !== 4) {
+    throw new EncodingError(
+      'InvalidDigestLength',
+      `${label}: expected 4 limbs, got ${limbs.length}`,
+      { length: limbs.length },
+    );
+  }
   for (let i = 0; i < 4; i++) {
-    const limb = d[i]!;
-    if (limb < 0n || limb >= GOLDILOCKS_P) {
+    const limb = limbs[i];
+    if (typeof limb !== 'bigint' || limb < 0n || limb >= GOLDILOCKS_P) {
       throw new EncodingError(
         'NonCanonicalDigestLimb',
-        `${label}: limb ${i} value ${limb.toString()} >= p (or negative)`,
-        { limbIndex: i, value: limb },
+        `${label}: limb ${i} value ${String(limb)} >= p (or negative)`,
+        { limbIndex: i, value: typeof limb === 'bigint' ? limb : String(limb) },
       );
     }
   }

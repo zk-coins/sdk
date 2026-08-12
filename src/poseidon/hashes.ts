@@ -216,6 +216,9 @@ export function nflogRoot(size: bigint, mth: Digest): Digest {
  * Corresponds to `coinhist_leaf_hash`.
  */
 export function coinhistLeafHash(state: 0 | 1 | 2): Digest {
+  if (!Number.isInteger(state) || state < 0 || state > 2) {
+    throw new RangeError(`coinhistLeafHash: state must be 0, 1 or 2, got ${String(state)}`);
+  }
   return hc(TAG_COINHIST_LEAF, [HcInput.smallNumeric(BigInt(state))]);
 }
 
