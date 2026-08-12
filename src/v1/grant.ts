@@ -98,8 +98,7 @@ export function encodeGrantAssetIds(allAssets: boolean, assetIds: Uint8Array[]):
   if (assetIds.length === 0) {
     throw new Error('encodeGrantAssetIds: scope.asset_ids list must be non-empty when not "*"');
   }
-  // unreachable in practice: JS Array length is a uint32; kept for parity with Rust u32::try_from
-  /* v8 ignore next 3 */
+  /* v8 ignore next 3 -- JS Array length is a uint32; u32 overflow is not constructible */
   if (assetIds.length > 0xffff_ffff) {
     throw new Error('encodeGrantAssetIds: scope.asset_ids count exceeds u32');
   }

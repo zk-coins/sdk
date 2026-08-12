@@ -3186,6 +3186,7 @@ describe('ViewGrant request surface', () => {
 
   it('grantScopeToJsonBody rejects contradictory and malformed asset scopes', () => {
     const id = new Uint8Array(32).fill(0x05);
+    // runtime-invalid shape: allAssets true with non-empty assetIds — static GrantScopeInput forbids it
     const contradictoryScope = {
       allAssets: true,
       assetIds: [id],
@@ -3288,6 +3289,7 @@ describe('ViewGrant request surface', () => {
       expiry: '1700000000',
       domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
     };
+    // runtime-invalid shape: allAssets true with non-empty assetIds — static GrantScopeInput forbids it
     const contradictoryScope = {
       allAssets: true,
       assetIds: [new Uint8Array(32)],

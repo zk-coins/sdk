@@ -111,7 +111,7 @@ npm run lint            # eslint --max-warnings 0 && prettier --check
 npm run lint:fix        # eslint --fix && prettier --write
 
 npm run test            # vitest unit tests
-npm run test:coverage   # 100% lines/functions/statements coverage gate on src/*
+npm run test:coverage   # 100% lines/functions/statements/branches coverage gate on src/*
 npm run test:cross      # JS-vs-Rust cross-tests — the load-bearing guarantee
                         # the pure-JS reimpl matches the protocol spec
 ```

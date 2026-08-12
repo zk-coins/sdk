@@ -167,6 +167,7 @@ export function encodeSmallNumeric(v: bigint): bigint {
  * Corresponds to `digest_to_bytes`.
  */
 export function digestToBytes(d: Digest): Uint8Array {
+  assertCanonicalDigest(d, 'digestToBytes');
   const out = new Uint8Array(32);
   for (let i = 0; i < 4; i++) {
     const limb = toCanonicalU64(d[i]!);

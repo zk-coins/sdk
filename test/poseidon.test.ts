@@ -236,6 +236,9 @@ describe('poseidonPermute (plonky2 test vectors)', () => {
   it('digestsEqual compares limbs', () => {
     expect(digestsEqual(ZERO_DIGEST, [0n, 0n, 0n, 0n])).toBe(true);
     expect(digestsEqual(ZERO_DIGEST, [1n, 0n, 0n, 0n])).toBe(false);
+    // runtime-invalid shape: 5 limbs with matching prefix — static Digest forbids it
+    const tooLong = [1n, 2n, 3n, 4n, 5n] as unknown as Digest;
+    expect(digestsEqual([1n, 2n, 3n, 4n], tooLong)).toBe(false);
   });
 });
 
@@ -337,8 +340,11 @@ describe('encodeDigest', () => {
   });
 
   it('rejects digests with wrong limb count', () => {
+    // runtime-invalid shape: 5 limbs — static Digest forbids it
     const tooLong = [1n, 2n, 3n, 4n, 5n] as unknown as Digest;
+    // runtime-invalid shape: 3 limbs — static Digest forbids it
     const tooShort = [1n, 2n, 3n] as unknown as Digest;
+    // runtime-invalid shape: object with numeric keys, not a tuple — static Digest forbids it
     const notArray = { 0: 1n, 1: 2n, 2: 3n, 3: 4n } as unknown as Digest;
     for (const forged of [tooLong, tooShort, notArray]) {
       try {
@@ -352,6 +358,7 @@ describe('encodeDigest', () => {
   });
 
   it('rejects a digest limb that is not a bigint', () => {
+    // runtime-invalid shape: limb 3 is a string, not bigint — static Digest forbids it
     const forged = [0n, 0n, 0n, 'x'] as unknown as Digest;
     try {
       encodeDigest(forged);
@@ -411,6 +418,22 @@ describe('digestToBytes / digestFromBytes', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(EncodingError);
       expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+    }
+  });
+
+  it('digestToBytes rejects digests with wrong limb count', () => {
+    // runtime-invalid shape: 3 limbs — static Digest forbids it
+    const tooShort = [1n, 2n, 3n] as unknown as Digest;
+    // runtime-invalid shape: 5 limbs — static Digest forbids it
+    const tooLong = [1n, 2n, 3n, 4n, 5n] as unknown as Digest;
+    for (const forged of [tooShort, tooLong]) {
+      try {
+        digestToBytes(forged);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(EncodingError);
+        expect((err as EncodingError).kind).toBe('InvalidDigestLength');
+      }
     }
   });
 
@@ -482,6 +505,7 @@ describe('hc', () => {
   });
 
   it('throws on unknown HcInput.type (fail-closed; never silently skip)', () => {
+    // runtime-invalid shape: unknown HcInput.type 'NotARealKind' — static HcInput forbids it
     const forged = { type: 'NotARealKind', bytes: new Uint8Array(0) } as unknown as ReturnType<
       typeof HcInput.byteString
     >;

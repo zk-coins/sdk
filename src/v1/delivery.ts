@@ -286,8 +286,7 @@ export function invoiceMessage(parts: InvoiceMessageParts): Uint8Array {
   }
 
   const memoBytes = new TextEncoder().encode(parts.memo ?? '');
-  // unreachable: a >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder
-  /* v8 ignore next 3 */
+  /* v8 ignore next 3 -- string/Uint8Array length is a uint32; >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder */
   if (memoBytes.length > 0xffff_ffff) {
     throw new DeliveryCredentialError('memo', 'invoiceMessage: memo length exceeds u32');
   }
@@ -296,8 +295,7 @@ export function invoiceMessage(parts: InvoiceMessageParts): Uint8Array {
   let relayBytesLen = 0;
   for (const r of parts.relays) {
     const b = new TextEncoder().encode(r);
-    // unreachable: a >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder
-    /* v8 ignore next 3 */
+    /* v8 ignore next 3 -- string/Uint8Array length is a uint32; >4 GiB input is not constructible; kept for u32 wire-length parity with the Rust encoder */
     if (b.length > 0xffff_ffff) {
       throw new DeliveryCredentialError('relays', 'invoiceMessage: relay URL length exceeds u32');
     }
