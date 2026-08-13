@@ -120,5 +120,14 @@ describe('package barrel exports', () => {
       expect(Object.prototype.hasOwnProperty.call(v1index, name)).toBe(false);
       expect((v1index as Record<string, unknown>)[name]).toBeUndefined();
     }
+
+    const forbidden = new Set(['SignTrace', 'signTransitionTrace', 'runWithRedrawBudget']);
+    const rootSource = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+    const v1Source = readFileSync(new URL('../src/v1/index.ts', import.meta.url), 'utf8');
+    for (const source of [rootSource, v1Source]) {
+      for (const entry of namedExports(source).flatMap((block) => block.entries)) {
+        expect(forbidden.has(entry.name)).toBe(false);
+      }
+    }
   });
 });
