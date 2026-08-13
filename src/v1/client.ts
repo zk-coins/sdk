@@ -649,10 +649,21 @@ export class ZkCoinsV1Client {
     scope?: GrantScopeInput,
     signal?: AbortSignal,
   ): Promise<V1PullResult> {
+    // Snapshot before any await so a caller mutation during challenge I/O cannot
+    // change the scope that reaches openPullSession / the wire body.
+    const scopeSnapshot: GrantScopeInput | undefined =
+      scope === undefined
+        ? undefined
+        : scope.allAssets === true
+          ? { ...scope }
+          : {
+              ...scope,
+              assetIds: scope.assetIds.map((id) => Uint8Array.from(id)),
+            };
     // Fail-closed before the challenge request: malformed scopes must not
     // cause any network I/O.
-    if (scope !== undefined) {
-      grantScopeToJsonBody(scope);
+    if (scopeSnapshot !== undefined) {
+      grantScopeToJsonBody(scopeSnapshot);
     }
     const challenge = await this.openPullChallenge(input.subject, signal);
     const subjectRaw = decodeZkAddress(input.subject);
@@ -667,7 +678,7 @@ export class ZkCoinsV1Client {
       {
         challenge,
         proof,
-        ...(scope !== undefined ? { scope } : {}),
+        ...(scopeSnapshot !== undefined ? { scope: scopeSnapshot } : {}),
       },
       signal,
     );
@@ -1072,6 +1083,9 @@ function parseSseJobPayload(
 function parseJobAccepted(data: unknown): V1JobAccepted {
   if (!isRecord(data)) throw new Error('JobAccepted: expected object');
   const job_id = requireString(data, 'job_id');
+  if (job_id.length === 0) {
+    throw new Error('JobAccepted.job_id is empty');
+  }
   const status = requireString(data, 'status');
   if (status !== 'accepted') {
     throw new Error(`JobAccepted.status must be "accepted", got ${JSON.stringify(status)}`);
@@ -1115,8 +1129,12 @@ function parseJob(data: unknown): V1Job {
   if (!isRecord(data)) throw new Error('job: expected object');
   const status = parseJobStatus(requireString(data, 'status'));
   const kind = requireString(data, 'kind');
+  const job_id = requireString(data, 'job_id');
+  if (job_id.length === 0) {
+    throw new Error('job.job_id is empty');
+  }
   const job: V1Job = {
-    job_id: requireString(data, 'job_id'),
+    job_id,
     kind,
     status,
     progress: requireNumber(data, 'progress'),
@@ -1124,7 +1142,21 @@ function parseJob(data: unknown): V1Job {
   if (typeof data.phase === 'string') {
     job.phase = data.phase;
   }
+  // Terminal envelope keys are disjoint: presence of the wrong key is a
+  // contradiction even when the right key is also present.
+  if (status === 'completed' && 'error' in data) {
+    throw new Error('job status is completed but error is present');
+  }
+  if ((status === 'failed' || status === 'cancelled') && 'result' in data) {
+    throw new Error(`job status is ${status} but result is present`);
+  }
   if (status === 'awaiting_signature') {
+    if ('result' in data) {
+      throw new Error('job status is awaiting_signature but result is present');
+    }
+    if ('error' in data) {
+      throw new Error('job status is awaiting_signature but error is present');
+    }
     job.awaiting_signature = parseAwaitingSignature(
       expectPresent(
         data.awaiting_signature,

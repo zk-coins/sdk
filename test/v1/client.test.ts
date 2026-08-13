@@ -1893,6 +1893,89 @@ describe('ZkCoinsV1Client request surface', () => {
     }
   });
 
+  it('mixed terminal envelopes are rejected (poll)', async () => {
+    const ash = '11'.repeat(32);
+    const ocr = '22'.repeat(32);
+    const inr = '33'.repeat(32);
+    const completedResult = {
+      new_account_state_hash: ash,
+      output_coins_root: ocr,
+      input_nullifiers_root: inr,
+      output_coin_ids: ['aa'.repeat(32)],
+    };
+    const terminalError = { error: 'proving_failed', message: 'witness build failed' };
+    const awaiting: AwaitingSignature = {
+      new_account_state_hash: ash,
+      output_coins_root: ocr,
+      input_nullifiers_root: inr,
+      coin_history_root: '44'.repeat(32),
+      nav_commitment: '55'.repeat(32),
+      npk_commit: '66'.repeat(32),
+      proof_data_hash: '77'.repeat(32),
+      txn_pubkey: '88'.repeat(32),
+      send_counter: 1,
+    };
+
+    const mixed: Array<{ id: string; body: Record<string, unknown>; message: string }> = [
+      {
+        id: 'mix-completed-error',
+        body: terminalJobBase('completed', {
+          job_id: 'mix-completed-error',
+          result: completedResult,
+          error: terminalError,
+        }),
+        message: 'job status is completed but error is present',
+      },
+      {
+        id: 'mix-failed-result',
+        body: terminalJobBase('failed', {
+          job_id: 'mix-failed-result',
+          error: terminalError,
+          result: completedResult,
+        }),
+        message: 'job status is failed but result is present',
+      },
+      {
+        id: 'mix-cancelled-result',
+        body: terminalJobBase('cancelled', {
+          job_id: 'mix-cancelled-result',
+          error: { error: 'cancelled', message: 'client cancel' },
+          result: completedResult,
+        }),
+        message: 'job status is cancelled but result is present',
+      },
+      {
+        id: 'mix-await-result',
+        body: {
+          job_id: 'mix-await-result',
+          kind: 'send',
+          status: 'awaiting_signature',
+          progress: 0.5,
+          awaiting_signature: awaiting,
+          result: completedResult,
+        },
+        message: 'job status is awaiting_signature but result is present',
+      },
+      {
+        id: 'mix-await-error',
+        body: {
+          job_id: 'mix-await-error',
+          kind: 'send',
+          status: 'awaiting_signature',
+          progress: 0.5,
+          awaiting_signature: awaiting,
+          error: terminalError,
+        },
+        message: 'job status is awaiting_signature but error is present',
+      },
+    ];
+
+    for (const c of mixed) {
+      server.use(http.get(`${BASE}/v1/jobs/${c.id}`, () => HttpResponse.json(c.body)));
+      await expectGetJobMessage(c.id, c.message);
+    }
+  });
+
   it('well-formed jobs per status are still accepted (poll + SSE)', async () => {
     const ash = '11'.repeat(32);
     const ocr = '22'.repeat(32);
@@ -2554,6 +2637,32 @@ describe('ZkCoinsV1Client fail-closed parsers (non-object wire bodies)', () => {
       () => newClient().submitTransition(RECEIVE_TX),
       'JobAccepted: expected object',
     );
+  });
+
+  it('parseJobAccepted: empty job_id', async () => {
+    server.use(
+      http.post(`${BASE}/v1/tx`, () =>
+        HttpResponse.json({ job_id: '', status: 'accepted' }, { status: 202 }),
+      ),
+    );
+    await expectExactError(
+      () => newClient().submitTransition(RECEIVE_TX),
+      'JobAccepted.job_id is empty',
+    );
+  });
+
+  it('parseJob: empty job_id', async () => {
+    server.use(
+      http.get(`${BASE}/v1/jobs/empty-id`, () =>
+        HttpResponse.json({
+          job_id: '',
+          kind: 'send',
+          status: 'proving',
+          progress: 0.1,
+        }),
+      ),
+    );
+    await expectExactError(() => newClient().getJob('empty-id'), 'job.job_id is empty');
   });
 
   it('parseJob: null body on GET job', async () => {
@@ -3832,12 +3941,22 @@ describe('ViewGrant request surface', () => {
 
   it('grantScopeToJsonBody rejects contradictory and malformed asset scopes', () => {
     const id = new Uint8Array(32).fill(0x05);
-    // runtime-invalid shape: allAssets true with non-empty assetIds — static GrantScopeInput forbids it
+    // runtime-invalid shape: allAssets true with assetIds present — static GrantScopeInput forbids it
     const contradictoryScope = {
       allAssets: true,
       assetIds: [id],
     } as unknown as GrantScopeInput;
     expect(() => grantScopeToJsonBody(contradictoryScope)).toThrow(/allAssets.*assetIds/);
+    const emptyAssetIdsWithAll = {
+      allAssets: true,
+      assetIds: [],
+    } as unknown as GrantScopeInput;
+    expect(() => grantScopeToJsonBody(emptyAssetIdsWithAll)).toThrow(/allAssets.*assetIds/);
+    const nullAssetIdsWithAll = {
+      allAssets: true,
+      assetIds: null,
+    } as unknown as GrantScopeInput;
+    expect(() => grantScopeToJsonBody(nullAssetIdsWithAll)).toThrow(/allAssets.*assetIds/);
     expect(() => grantScopeToJsonBody({ assetIds: [] })).toThrow(/must be non-empty when not "\*"/);
     expect(() => grantScopeToJsonBody({ assetIds: [new Uint8Array(16)] })).toThrow(
       /asset_ids\[0\] must be 32 bytes/,
@@ -4500,6 +4619,100 @@ describe('ViewGrant request surface', () => {
       { assetIds },
     );
     expect(pull.session).toBe('grant-scope-session');
+  });
+
+  it('openGrantPullSession with allAssets scope snapshots allAssets arm and echoes "*" on pull body', async () => {
+    const nonce = '77'.repeat(32);
+    const expiry = '1700000140';
+
+    server.use(
+      http.post(`${BASE}/v1/pull/challenge`, () =>
+        HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        }),
+      ),
+      http.post(`${BASE}/v1/pull`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('pull body: expected object');
+        const scope = raw['scope'];
+        if (!isJsonRecord(scope)) throw new Error('scope: expected object');
+        expect(scope['asset_ids']).toBe('*');
+        expect(scope['not_before']).toBe('0');
+        expect(scope['not_after']).toBe(SCOPE_NOT_AFTER_UNBOUNDED.toString());
+        const proofRaw = raw['proof'];
+        if (!isJsonRecord(proofRaw)) throw new Error('proof: expected object');
+        expect(proofRaw['type']).toBe('grant');
+        return HttpResponse.json({
+          records: [],
+          session: 'grant-allassets-session',
+          session_expiry: '1700002000',
+        });
+      }),
+    );
+
+    const pull = await newClient().openGrantPullSession(
+      {
+        subject,
+        grant: OPAQUE_GRANT,
+        granteeSecret: grantee.secretKey,
+      },
+      { allAssets: true },
+    );
+    expect(pull.session).toBe('grant-allassets-session');
+  });
+
+  it('openGrantPullSession snapshots scope before challenge await (caller mutation ignored)', async () => {
+    const nonce = '66'.repeat(32);
+    const expiry = '1700000130';
+    const originalId = new Uint8Array(32).fill(0x03);
+    const expectedHex = encodeHexLower(Uint8Array.from(originalId));
+    const scope = { assetIds: [originalId] };
+    let pullBody: Record<string, unknown> | undefined;
+
+    server.use(
+      http.post(`${BASE}/v1/pull/challenge`, async () => {
+        // Mutate after the request arrived — post-snapshot, pre-response — so a
+        // re-read of the caller object would pick up the poisoned bytes.
+        scope.assetIds[0]!.fill(0xff);
+        scope.assetIds = [new Uint8Array(32).fill(0xaa)];
+        return HttpResponse.json({
+          nonce,
+          expiry,
+          domain: PULL_CHALLENGE_DOMAIN,
+        });
+      }),
+      http.post(`${BASE}/v1/pull`, async ({ request }) => {
+        const raw: unknown = await request.json();
+        if (!isJsonRecord(raw)) throw new Error('pull body: expected object');
+        pullBody = raw;
+        const wireScope = raw['scope'];
+        if (!isJsonRecord(wireScope)) throw new Error('scope: expected object');
+        expect(wireScope['asset_ids']).toEqual([expectedHex]);
+        return HttpResponse.json({
+          records: [],
+          session: 'grant-snapshot-session',
+          session_expiry: '1700003000',
+        });
+      }),
+    );
+
+    const pull = await newClient().openGrantPullSession(
+      {
+        subject,
+        grant: OPAQUE_GRANT,
+        granteeSecret: grantee.secretKey,
+      },
+      scope,
+    );
+    expect(pull.session).toBe('grant-snapshot-session');
+    expect(pullBody).toBeDefined();
+    const wireScope = pullBody!['scope'];
+    if (!isJsonRecord(wireScope)) throw new Error('scope: expected object');
+    expect(wireScope['asset_ids']).toEqual([expectedHex]);
+    expect(wireScope['asset_ids']).not.toEqual([encodeHexLower(new Uint8Array(32).fill(0xff))]);
+    expect(wireScope['asset_ids']).not.toEqual([encodeHexLower(new Uint8Array(32).fill(0xaa))]);
   });
 
   it('openPullSession rejects a malformed scope before any network call', async () => {

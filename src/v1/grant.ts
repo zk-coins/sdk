@@ -49,9 +49,9 @@ export type GrantScopeInput =
   | { allAssets?: false; assetIds: Uint8Array[]; notBefore?: bigint; notAfter?: bigint };
 
 function assertConsistentAssetScope(scope: GrantScopeInput): void {
-  const assetIds = (scope as { assetIds?: unknown }).assetIds;
-  if (scope.allAssets === true && Array.isArray(assetIds) && assetIds.length > 0) {
-    throw new Error('Grant scope is contradictory: allAssets is true but assetIds is non-empty');
+  // Presence, not content: empty arrays / non-arrays must not reconcile with allAssets.
+  if (scope.allAssets === true && 'assetIds' in scope) {
+    throw new Error('Grant scope is contradictory: allAssets is true but assetIds is present');
   }
 }
 
