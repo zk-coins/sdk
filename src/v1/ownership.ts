@@ -13,8 +13,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
 import { decodeZkAddress } from './bech32m.js';
+import { addressFromParts } from './delivery.js';
 import { CsprngUnavailableError } from './errors.js';
-import { decodeHexExact, encodeHexLower } from './hex.js';
+import { bytesEqual, decodeHexExact, encodeHexLower } from './hex.js';
 import { bip340NormaliseSecret } from './transitionSignature.js';
 
 /** `ChallengeDomain::Pull` / `PULL_CHALLENGE_DOMAIN` in api/src/ownership.rs. */
@@ -206,6 +207,10 @@ export function buildOwnershipProof(input: {
   }
 
   const { pkBytes } = bip340NormaliseSecret(input.sk0);
+  const derived = addressFromParts(pkBytes, input.nkCommit);
+  if (!bytesEqual(derived, subjectRaw)) {
+    throw new Error('buildOwnershipProof: subject does not match SHA-256(Pk0 || nk_commit)');
+  }
   // BIP-340 over the 32-byte chal digest. noble normalises the secret;
   // zero aux-rand is fine for ownership proofs (not a transition nonce).
   const signature = schnorr.sign(chal, input.sk0, new Uint8Array(32));

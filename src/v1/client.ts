@@ -420,57 +420,107 @@ export class ZkCoinsV1Client {
       const reader = body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        buffer += decoder.decode(value, { stream: true });
-        let boundary = findSseFrameBoundary(buffer);
-        while (boundary !== null) {
-          const frame = buffer.slice(0, boundary.index);
-          buffer = buffer.slice(boundary.index + boundary.length);
-          let eventName = 'message';
-          let dataPayload = '';
-          // SSE: lines end with CRLF, LF, or CR (WHATWG / HTML Living Standard).
-          for (const line of frame.split(/\r\n|\n|\r/)) {
-            if (line.startsWith(':')) continue;
-            if (line.startsWith('event:')) {
-              eventName = line.slice('event:'.length).trim();
-            } else if (line.startsWith('data:')) {
-              // Accumulate multi-line data with newline (SSE); our frames are single-line JSON.
-              const piece = line.slice('data:'.length).trimStart();
-              dataPayload = dataPayload.length === 0 ? piece : `${dataPayload}\n${piece}`;
-            }
+
+      /**
+       * Parse one SSE frame text into a yieldable job view.
+       * Shared by the read loop and the EOF flush path so final frames
+       * without a trailing blank line are not dropped.
+       * Terminal statuses: completed | failed | cancelled.
+       */
+      const consumeSseFrame = (
+        frame: string,
+      ): { yieldFrame: V1SseStreamFrame | null; terminal: boolean } => {
+        let eventName = 'message';
+        let dataPayload = '';
+        // SSE: lines end with CRLF, LF, or CR (WHATWG / HTML Living Standard).
+        for (const line of frame.split(/\r\n|\n|\r/)) {
+          if (line.startsWith(':')) continue;
+          if (line.startsWith('event:')) {
+            eventName = line.slice('event:'.length).trim();
+          } else if (line.startsWith('data:')) {
+            // Accumulate multi-line data with newline (SSE); our frames are single-line JSON.
+            const piece = line.slice('data:'.length).trimStart();
+            dataPayload = dataPayload.length === 0 ? piece : `${dataPayload}\n${piece}`;
           }
-          if (dataPayload.length === 0) {
-            boundary = findSseFrameBoundary(buffer);
-            continue;
-          }
-          const parsed: unknown = JSON.parse(dataPayload);
-          const view = parseSseJobPayload(parsed);
-          // Clients dispatch only on status — yield it explicitly.
-          // Branch on `full` so the yielded value keeps the discriminated union
-          // (object-spread would collapse the two arms into one mixed type).
-          if (view.full) {
-            yield {
+        }
+        if (dataPayload.length === 0) {
+          return { yieldFrame: null, terminal: false };
+        }
+        const parsed: unknown = JSON.parse(dataPayload);
+        const view = parseSseJobPayload(parsed);
+        // Clients dispatch only on status — yield it explicitly.
+        // Branch on `full` so the yielded value keeps the discriminated union
+        // (object-spread would collapse the two arms into one mixed type).
+        const yieldFrame: V1SseStreamFrame = view.full
+          ? {
               event: eventName,
               status: view.status,
               full: true,
               job: view.job,
-            };
-          } else {
-            yield {
+            }
+          : {
               event: eventName,
               status: view.status,
               full: false,
               job: view.job,
             };
+        const terminal =
+          view.status === 'completed' ||
+          view.status === 'failed' ||
+          view.status === 'cancelled';
+        return { yieldFrame, terminal };
+      };
+
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) {
+          // Some runtimes deliver a final chunk with done=true; absorb it before flush.
+          if (value !== undefined) {
+            buffer += decoder.decode(value, { stream: true });
           }
-          if (
-            view.status === 'completed' ||
-            view.status === 'failed' ||
-            view.status === 'cancelled'
-          ) {
+          // Flush decoder (final incomplete UTF-8 sequence) and drain remainder.
+          buffer += decoder.decode();
+          let sawTerminal = false;
+          let boundary = findSseFrameBoundary(buffer);
+          while (boundary !== null) {
+            const frame = buffer.slice(0, boundary.index);
+            buffer = buffer.slice(boundary.index + boundary.length);
+            const result = consumeSseFrame(frame);
+            if (result.yieldFrame !== null) {
+              yield result.yieldFrame;
+              if (result.terminal) {
+                sawTerminal = true;
+                break;
+              }
+            }
+            boundary = findSseFrameBoundary(buffer);
+          }
+          // Trailing bytes without a closing blank line still form one frame.
+          if (!sawTerminal && buffer.length > 0) {
+            const result = consumeSseFrame(buffer);
+            if (result.yieldFrame !== null) {
+              yield result.yieldFrame;
+              if (result.terminal) {
+                sawTerminal = true;
+              }
+            }
+          }
+          if (sawTerminal) {
             return;
+          }
+          throw new Error('streamJob: stream ended without terminal status');
+        }
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = findSseFrameBoundary(buffer);
+        while (boundary !== null) {
+          const frame = buffer.slice(0, boundary.index);
+          buffer = buffer.slice(boundary.index + boundary.length);
+          const result = consumeSseFrame(frame);
+          if (result.yieldFrame !== null) {
+            yield result.yieldFrame;
+            if (result.terminal) {
+              return;
+            }
           }
           boundary = findSseFrameBoundary(buffer);
         }
@@ -951,8 +1001,8 @@ function requireNumber(obj: Record<string, unknown>, key: string): number {
 
 function requireCounter(obj: Record<string, unknown>, key: string): number {
   const v = requireNumber(obj, key);
-  if (!Number.isInteger(v) || v < 0) {
-    throw new Error(`response.${key}: expected non-negative integer`);
+  if (!Number.isSafeInteger(v) || v < 0 || v > 0x7fffffff) {
+    throw new Error(`response.${key}: expected integer in [0, 2^31-1]`);
   }
   return v;
 }
@@ -1196,20 +1246,26 @@ function requireAttestationHex(value: unknown, field: string): string {
  * Locate the next SSE event-stream frame boundary.
  *
  * WHATWG / HTML Living Standard allow CRLF, LF, or CR as line terminators;
- * a blank line (two consecutive terminators) ends a frame. Prefer the
- * earliest match among `\r\n\r\n`, `\n\n`, and `\r\r`.
+ * a blank line is two consecutive terminators and ends a frame. Scan every
+ * pair from {CRLF, LF, CR} × {CRLF, LF, CR}; the earliest match wins, and on
+ * a shared index the longest match wins. A single `\r\n` is not a frame end.
  */
 function findSseFrameBoundary(buffer: string): { index: number; length: number } | null {
   let best: { index: number; length: number } | null = null;
   const candidates: ReadonlyArray<readonly [string, number]> = [
     ['\r\n\r\n', 4],
+    ['\r\n\n', 3],
+    ['\r\n\r', 3],
+    ['\n\r\n', 3],
     ['\n\n', 2],
+    ['\n\r', 2],
+    ['\r\r\n', 3],
     ['\r\r', 2],
   ];
   for (const [sep, length] of candidates) {
     const index = buffer.indexOf(sep);
     if (index === -1) continue;
-    if (best === null || index < best.index) {
+    if (best === null || index < best.index || (index === best.index && length > best.length)) {
       best = { index, length };
     }
   }
@@ -1378,11 +1434,13 @@ function parseV1ApiError(status: number, rawBody: string): V1ApiError {
 }
 
 function redactError(err: V1ApiError, token: string): V1ApiError {
-  // err.message is `zkCoins v1 API error <status> <code>: <human>` — rebuild
-  // from redacted human text only so the token cannot reappear in the prefix.
+  // err.message is `zkCoins v1 API error <status> <code>: <human>` — slice with
+  // the original machineCode so startsWith matches, then rebuild with the
+  // redacted code so a token in the JSON `error` field never reappears.
   const prefix = `zkCoins v1 API error ${err.status} ${err.machineCode}: `;
   const human = err.message.startsWith(prefix) ? err.message.slice(prefix.length) : err.message;
   const redactedHuman = redactBearerToken(human, token);
+  const redactedCode = redactBearerToken(err.machineCode, token);
   const raw = err.rawBody !== undefined ? redactBearerToken(err.rawBody, token) : undefined;
-  return new V1ApiError(err.status, err.machineCode, redactedHuman, raw);
+  return new V1ApiError(err.status, redactedCode, redactedHuman, raw);
 }

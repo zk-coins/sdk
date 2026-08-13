@@ -932,6 +932,22 @@ describe('signGate remaining refusals', () => {
       signBodyFromSignature({ signature: new Uint8Array(64), s2cNonce: new Uint8Array(16) }),
     ).toThrow(/s2c_nonce must be 32 bytes, got 16/);
   });
+
+  it('throws when secretKey does not derive localPubkey', () => {
+    const wrongSecret = new Uint8Array(32).fill(0x03);
+    expect(encodeHexLower(xOnlyPubkeyFromSecret(wrongSecret))).not.toBe(encodeHexLower(V8_PK1));
+    expect(() =>
+      refuseOrSignTransition({
+        localPubkey: V8_PK1,
+        secretKey: wrongSecret,
+        accountState,
+        awaiting: awaiting(),
+        walletNetwork: 'testnet',
+        nextPubkey,
+        npkRand,
+      }),
+    ).toThrow(/secretKey does not match localPubkey/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1039,27 @@ describe('ownership / chan_bind / expiry gates', () => {
         host: 'node.test',
       }),
     ).toThrow(/nk_commit must be 32 bytes/);
+  });
+
+  it('buildOwnershipProof rejects subject that does not match Pk0||nk_commit', () => {
+    const seed = seedFromMnemonicV1(MNEMONIC);
+    const sk0 = deriveSk0(seed, 0);
+    const nkCommit = new Uint8Array(32);
+    // Foreign subject — not SHA-256(pk0 || nk_commit)
+    const subject = encodeZkAddress(sha256(new Uint8Array(64)));
+    expect(() =>
+      buildOwnershipProof({
+        subject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge: {
+          nonce: 'aa'.repeat(32),
+          expiry: '1',
+          domain: PULL_CHALLENGE_DOMAIN,
+        },
+        host: 'node.test',
+      }),
+    ).toThrow(/subject does not match/);
   });
 
   it('computeNpkCommit rejects wrong lengths', () => {

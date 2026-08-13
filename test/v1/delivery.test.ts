@@ -892,6 +892,46 @@ describe('PaymentIdentityPinStore edge paths', () => {
       ),
     ).not.toThrow();
   });
+
+  it('get() returns a defensive copy of the stored pin', () => {
+    const store = new PaymentIdentityPinStore();
+    store.set(OP_PUBKEY_HEX, {
+      address: V2_BECH32,
+      pk0: V2_PK0_SAMPLE,
+      nk_commit: V2_NK_COMMIT_SAMPLE,
+      ivpk: IVPK_HEX,
+    });
+    const a = store.get(OP_PUBKEY_HEX)!;
+    a.address = 'mutated-address';
+    a.pk0 = '00'.repeat(32);
+    const b = store.get(OP_PUBKEY_HEX)!;
+    expect(b.address).toBe(V2_BECH32);
+    expect(b.pk0).toBe(V2_PK0_SAMPLE);
+    expect(a).not.toBe(b);
+  });
+
+  it('mismatch pin/credential copies do not alias store storage', () => {
+    const store = new PaymentIdentityPinStore();
+    const originalPk0 = V2_PK0_SAMPLE;
+    store.set(OP_PUBKEY_HEX, {
+      address: V2_BECH32,
+      pk0: originalPk0,
+      nk_commit: V2_NK_COMMIT_SAMPLE,
+      ivpk: IVPK_HEX,
+    });
+    const result = store.check(OP_PUBKEY_HEX, {
+      address: V2_BECH32,
+      pk0: PK0_HEX,
+      nk_commit: V2_NK_COMMIT_SAMPLE,
+      ivpk: IVPK_HEX,
+    });
+    expect(result.status).toBe('mismatch');
+    if (result.status !== 'mismatch') throw new Error('expected mismatch');
+    result.pin.pk0 = '00'.repeat(32);
+    result.credential.pk0 = '11'.repeat(32);
+    const again = store.get(OP_PUBKEY_HEX)!;
+    expect(again.pk0).toBe(originalPk0);
+  });
 });
 
 describe('addressFromParts / invoiceMessage bounds', () => {
@@ -1523,5 +1563,33 @@ describe('issueInvoice', () => {
     await expect(issueInvoice({ ...baseParams(), ivpk: new Uint8Array(16) })).rejects.toThrow(
       /ivpk/,
     );
+  });
+
+  it('snapshots inputs before the first await (TOCTOU)', async () => {
+    const params = baseParams();
+    const pending = issueInvoice(params);
+    params.nkCommit.fill(0);
+    params.ivpk.fill(0);
+    params.sk0Secret.fill(0);
+    params.opSecret.fill(0);
+    params.relays.push('wss://evil.example');
+    params.amount = '999';
+    params.assetId = '00'.repeat(32);
+    const invoice = await pending;
+    expect(invoice.amount).toBe(AMOUNT);
+    expect(invoice.asset_id).toBe(ASSET_ID);
+    expect(invoice.relays).toEqual([RELAY]);
+    expect(invoice.relays).not.toBe(params.relays);
+    expect(() =>
+      verifyDeliveryCredential(
+        { type: 'invoice', invoice },
+        {
+          recipient: invoice.recipient,
+          asset_id: invoice.asset_id,
+          amount: invoice.amount,
+        },
+        { network: 'regtest' },
+      ),
+    ).not.toThrow();
   });
 });

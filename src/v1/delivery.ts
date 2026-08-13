@@ -129,6 +129,16 @@ export class PaymentIdentityPinMismatchError extends Error {
 // Pin store
 // ---------------------------------------------------------------------------
 
+/** Defensive copy of pin fields — callers must never alias store storage. */
+function copyPin(pin: PaymentIdentityPin): PaymentIdentityPin {
+  return {
+    address: pin.address,
+    pk0: pin.pk0,
+    nk_commit: pin.nk_commit,
+    ivpk: pin.ivpk,
+  };
+}
+
 /**
  * Local §4.3 payment-identity pin set, keyed by `op_pubkey` (lowercase hex).
  *
@@ -139,9 +149,10 @@ export class PaymentIdentityPinMismatchError extends Error {
 export class PaymentIdentityPinStore {
   private readonly pins = new Map<string, PaymentIdentityPin>();
 
-  /** Lookup by lowercase-hex `op_pubkey`. */
+  /** Lookup by lowercase-hex `op_pubkey`. Returns a copy; never the store entry. */
   get(opPubkey: string): PaymentIdentityPin | undefined {
-    return this.pins.get(normalizeOpKey(opPubkey));
+    const pin = this.pins.get(normalizeOpKey(opPubkey));
+    return pin === undefined ? undefined : copyPin(pin);
   }
 
   /**
@@ -149,12 +160,7 @@ export class PaymentIdentityPinStore {
    * explicit user confirmation of a changed identity.
    */
   set(opPubkey: string, pin: PaymentIdentityPin): void {
-    this.pins.set(normalizeOpKey(opPubkey), {
-      address: pin.address,
-      pk0: pin.pk0,
-      nk_commit: pin.nk_commit,
-      ivpk: pin.ivpk,
-    });
+    this.pins.set(normalizeOpKey(opPubkey), copyPin(pin));
   }
 
   /** Remove a pin (e.g. user discards a contact). */
@@ -165,6 +171,7 @@ export class PaymentIdentityPinStore {
   /**
    * Compare a credential's payment identity against any pin held for
    * `opPubkey`. Absent pin → first contact.
+   * On mismatch, both `pin` and `credential` are defensive copies.
    */
   check(opPubkey: string, candidate: PaymentIdentityPin): PinCheckResult {
     const pin = this.get(opPubkey);
@@ -174,7 +181,7 @@ export class PaymentIdentityPinStore {
     if (pinsEqual(pin, candidate)) {
       return { status: 'match' };
     }
-    return { status: 'mismatch', pin, credential: candidate };
+    return { status: 'mismatch', pin, credential: copyPin(candidate) };
   }
 }
 
@@ -405,6 +412,8 @@ export interface IssueInvoiceParams {
  * enclosing output matches (recipient / asset_id / amount).
  */
 export async function issueInvoice(params: IssueInvoiceParams): Promise<InvoiceJson> {
+  // Snapshot every input before the first await so concurrent mutation of
+  // params (or its byte arrays / relays list) cannot change signature 2 or wire.
   if (params.relays.length === 0) {
     throw new DeliveryCredentialError('relays', 'issueInvoice: relays must be non-empty');
   }
@@ -412,45 +421,55 @@ export async function issueInvoice(params: IssueInvoiceParams): Promise<InvoiceJ
     validateRelayUrl(url);
   }
 
-  const amount = parseU128Decimal(params.amount, 'amount');
-  const assetId = decodeHexExact(params.assetId, 32, 'asset_id');
+  const amountStr = params.amount;
+  const amount = parseU128Decimal(amountStr, 'amount');
+  const assetIdStr = params.assetId;
+  const assetId = decodeHexExact(assetIdStr, 32, 'asset_id');
   require32(params.nkCommit, 'nk_commit');
   require32(params.ivpk, 'ivpk');
+  require32(params.sk0Secret, 'sk0Secret');
+  require32(params.opSecret, 'opSecret');
+  const nkCommit = new Uint8Array(params.nkCommit);
+  const ivpk = new Uint8Array(params.ivpk);
+  const sk0Secret = new Uint8Array(params.sk0Secret);
+  const opSecret = new Uint8Array(params.opSecret);
+  const relays = params.relays.slice();
+  const memo = params.memo;
 
-  const { pkBytes: pk0 } = bip340NormaliseSecret(params.sk0Secret);
-  const { pkBytes: opPubkey } = bip340NormaliseSecret(params.opSecret);
+  const { pkBytes: pk0 } = bip340NormaliseSecret(sk0Secret);
+  const { pkBytes: opPubkey } = bip340NormaliseSecret(opSecret);
 
-  const recipientRaw = addressFromParts(pk0, params.nkCommit);
+  const recipientRaw = addressFromParts(pk0, nkCommit);
   const recipient = encodeZkAddress(recipientRaw);
 
   const msg = invoiceMessage({
     amount,
     recipient: recipientRaw,
     pk0,
-    nkCommit: params.nkCommit,
+    nkCommit,
     assetId,
-    ...(params.memo !== undefined ? { memo: params.memo } : {}),
-    ivpk: params.ivpk,
+    ...(memo !== undefined ? { memo } : {}),
+    ivpk,
     opPubkey,
-    relays: params.relays,
+    relays,
   });
 
-  const addrSigHex = await signSchnorr(encodeHexLower(params.sk0Secret), encodeHexLower(msg));
-  const sigHex = await signSchnorr(encodeHexLower(params.opSecret), encodeHexLower(msg));
+  const addrSigHex = await signSchnorr(encodeHexLower(sk0Secret), encodeHexLower(msg));
+  const sigHex = await signSchnorr(encodeHexLower(opSecret), encodeHexLower(msg));
 
   const out: InvoiceJson = {
-    amount: params.amount,
+    amount: amountStr,
     recipient,
-    asset_id: params.assetId,
+    asset_id: assetIdStr,
     pk0: encodeHexLower(pk0),
-    nk_commit: encodeHexLower(params.nkCommit),
-    ivpk: encodeHexLower(params.ivpk),
+    nk_commit: encodeHexLower(nkCommit),
+    ivpk: encodeHexLower(ivpk),
     op_pubkey: encodeHexLower(opPubkey),
-    relays: params.relays.slice(),
+    relays: relays.slice(),
     addr_sig: addrSigHex,
     sig: sigHex,
   };
-  if (params.memo !== undefined) out.memo = params.memo;
+  if (memo !== undefined) out.memo = memo;
   return out;
 }
 

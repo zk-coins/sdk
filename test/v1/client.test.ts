@@ -1345,10 +1345,12 @@ describe('ZkCoinsV1Client request surface', () => {
     expect(state.last_nullifier).toBeUndefined();
   });
 
-  it('rejects negative and fractional awaiting_signature send_counter values', async () => {
+  it('rejects out-of-range awaiting_signature send_counter values', async () => {
     for (const [suffix, sendCounter] of [
       ['negative', -1],
-      ['fractional', 0.5],
+      ['fractional', 1.5],
+      ['above-i32-max', 0x80000000],
+      ['non-safe-integer', Number.MAX_SAFE_INTEGER + 1],
     ] as const) {
       const jobId = `bad-await-counter-${suffix}`;
       server.use(
@@ -1365,12 +1367,14 @@ describe('ZkCoinsV1Client request surface', () => {
           }),
         ),
       );
-      await expect(newClient().getJob(jobId)).rejects.toThrow(/expected non-negative integer/);
+      await expect(newClient().getJob(jobId)).rejects.toThrow(
+        /expected integer in \[0, 2\^31-1\]/,
+      );
     }
   });
 
-  it('rejects negative and fractional account-state send_counter values', async () => {
-    for (const sendCounter of [-1, 0.5]) {
+  it('rejects out-of-range account-state send_counter values', async () => {
+    for (const sendCounter of [-1, 1.5, 0x80000000, Number.MAX_SAFE_INTEGER + 1]) {
       server.use(
         http.get(`${BASE}/v1/account/state`, () =>
           HttpResponse.json({
@@ -1382,9 +1386,24 @@ describe('ZkCoinsV1Client request surface', () => {
         ),
       );
       await expect(newClient().getAccountState('tok')).rejects.toThrow(
-        /expected non-negative integer/,
+        /expected integer in \[0, 2\^31-1\]/,
       );
     }
+  });
+
+  it('getAccountState accepts send_counter at 2^31-1', async () => {
+    server.use(
+      http.get(`${BASE}/v1/account/state`, () =>
+        HttpResponse.json({
+          account_state: 'aa'.repeat(32),
+          state_head: 'bb'.repeat(32),
+          send_counter: 0x7fffffff,
+          current_pubkey: 'cc'.repeat(32),
+        }),
+      ),
+    );
+    const state = await newClient().getAccountState('tok');
+    expect(state.send_counter).toBe(0x7fffffff);
   });
 
   it('accepts fractional progress while send_counter remains integer-only', async () => {
@@ -2167,8 +2186,155 @@ describe('ZkCoinsV1Client request surface', () => {
       for await (const frame of newClient().streamJob(id)) {
         seen.push(frame.status);
       }
-      expect(seen).toContain('completed');
+      if (id === 'mixed-lf-first') {
+        expect(seen).toEqual(['proving', 'completed']);
+      } else {
+        // Terminal first: streamJob returns before the trailing proving frame.
+        expect(seen).toEqual(['completed']);
+      }
     }
+  });
+
+  it('SSE frames delimited by CRLF then CR blank line are processed', async () => {
+    // Blank line is `\r\n` + `\r` (not in the homogeneous pair set).
+    const completed = {
+      job_id: 'sse-crlf-cr',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: [] as string[],
+      },
+    };
+    const frames =
+      `event: complete\r\ndata: ${JSON.stringify(completed)}\r\n\r` +
+      'event: phase\ndata: {"status":"proving","progress":0.1}\n';
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-crlf-cr/stream`,
+        () =>
+          new HttpResponse(frames, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    for await (const frame of newClient().streamJob('sse-crlf-cr')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('SSE frames delimited by LF then CRLF blank line are processed', async () => {
+    // Blank line is `\n` + `\r\n` (not in the homogeneous pair set).
+    const completed = {
+      job_id: 'sse-lf-crlf',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: [] as string[],
+      },
+    };
+    const frames =
+      `event: complete\ndata: ${JSON.stringify(completed)}\n\r\n` +
+      'event: phase\ndata: {"status":"proving","progress":0.1}\n';
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-lf-crlf/stream`,
+        () =>
+          new HttpResponse(frames, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    for await (const frame of newClient().streamJob('sse-lf-crlf')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('SSE flushes a terminal frame split across two ReadableStream chunks', async () => {
+    // First enqueue leaves the frame incomplete; the second closes the blank
+    // line on the normal done=false path. Chunk-boundary test, not a done=true
+    // drain (those use a custom getReader further below).
+    const body = {
+      job_id: 'sse-eof-bound',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const full = `event: complete\ndata: ${JSON.stringify(body)}\n\n`;
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(enc.encode(full.slice(0, 24)));
+        controller.enqueue(enc.encode(full.slice(24)));
+        controller.close();
+      },
+    });
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-eof-bound/stream`,
+        () =>
+          new HttpResponse(stream, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    for await (const frame of newClient().streamJob('sse-eof-bound')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('SSE flushes a terminal frame without a trailing blank line at EOF', async () => {
+    // No closing blank line → only the trailing-buffer flush on done yields.
+    const body = {
+      job_id: 'sse-eof-trail',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['bb'.repeat(32)],
+      },
+    };
+    const frames = `event: complete\ndata: ${JSON.stringify(body)}\n`;
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/sse-eof-trail/stream`,
+        () =>
+          new HttpResponse(frames, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    for await (const frame of newClient().streamJob('sse-eof-trail')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
   });
 
   it('SSE phase frame with awaiting_signature but no payload fails closed', async () => {
@@ -2512,8 +2678,7 @@ describe('ZkCoinsV1Client fail-closed parsers (non-object wire bodies)', () => {
 
   it('streamJob: peer closes without a terminal status frame (truncated SSE)', async () => {
     // Realistic cut: one non-terminal phase frame, then the connection ends.
-    // Client must not invent completed/failed/cancelled — the generator just
-    // returns when the readable stream signals done.
+    // Client must not invent completed/failed/cancelled — fail closed instead.
     const frames = 'event: phase\ndata: {"status":"proving","progress":0.1}\n\n';
     server.use(
       http.get(
@@ -2526,10 +2691,476 @@ describe('ZkCoinsV1Client fail-closed parsers (non-object wire bodies)', () => {
       ),
     );
     const seen: string[] = [];
-    for await (const frame of newClient().streamJob('cut')) {
+    await expect(async () => {
+      for await (const frame of newClient().streamJob('cut')) {
+        seen.push(frame.status);
+      }
+    }).rejects.toThrow(/stream ended without terminal status/);
+    expect(seen).toEqual(['proving']);
+  });
+
+  it('streamJob: empty body ends without terminal status', async () => {
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/empty-sse/stream`,
+        () =>
+          new HttpResponse('', {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    await expect(async () => {
+      for await (const _ of newClient().streamJob('empty-sse')) {
+        // never
+      }
+    }).rejects.toThrow(/stream ended without terminal status/);
+  });
+
+  it('streamJob: trailing frame without blank line is still consumed', async () => {
+    const completed = {
+      job_id: 'trail',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    // No trailing \n\n — final incomplete-looking buffer is still one frame.
+    const body = `event: complete\ndata: ${JSON.stringify(completed)}`;
+    server.use(
+      http.get(
+        `${BASE}/v1/jobs/trail/stream`,
+        () =>
+          new HttpResponse(body, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          }),
+      ),
+    );
+    const seen: string[] = [];
+    for await (const frame of newClient().streamJob('trail')) {
       seen.push(frame.status);
     }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('streamJob: single read with done=true still drains two SSE frames', async () => {
+    // Real ReadableStreams typically split final bytes ({value, done:false}) from
+    // EOF ({done:true}). Some runtimes hand both in one read — exercise that path.
+    const completed = {
+      job_id: 'done-value',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const frames =
+      'event: phase\ndata: {"status":"proving","progress":0.1}\n\n' +
+      `event: complete\ndata: ${JSON.stringify(completed)}\n\n`;
+    const chunk = new TextEncoder().encode(frames);
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: chunk, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    for await (const frame of client.streamJob('done-value')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['proving', 'completed']);
+  });
+
+  it('streamJob: done=true completed frame after a non-done proving chunk returns in the drain loop', async () => {
+    // First read: non-done proving frame (normal path). Second: done=true with a
+    // completed frame so the drain while-loop yields terminal and returns (line 488).
+    const completed = {
+      job_id: 'done-drain',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const provingChunk = new TextEncoder().encode(
+      'event: phase\ndata: {"status":"proving","progress":0.1}\n\n',
+    );
+    const completedChunk = new TextEncoder().encode(
+      `event: complete\ndata: ${JSON.stringify(completed)}\n\n`,
+    );
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let step = 0;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (step === 0) {
+                  step = 1;
+                  return { value: provingChunk, done: false as const };
+                }
+                if (step === 1) {
+                  step = 2;
+                  return { value: completedChunk, done: true as const };
+                }
+                return { value: undefined, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    for await (const frame of client.streamJob('done-drain')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['proving', 'completed']);
+  });
+
+  it('streamJob: trailing non-terminal frame without blank line yields then throws', async () => {
+    // done=true with a proving fragment that has no blank-line boundary — the
+    // while over findSseFrameBoundary finds nothing; trailing buffer consume
+    // yields proving (non-terminal), then throws (lines 499–501 + throw).
+    const fragment = new TextEncoder().encode(
+      'event: job\ndata: {"status":"proving","progress":0.1}\n',
+    );
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: fragment, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    await expect(async () => {
+      for await (const frame of client.streamJob('trail-nonterm')) {
+        seen.push(frame.status);
+      }
+    }).rejects.toThrow(/stream ended without terminal status/);
     expect(seen).toEqual(['proving']);
+  });
+
+  it('streamJob: done=true single complete SSE frame returns in the drain while-loop', async () => {
+    // One complete frame (with blank-line boundary) on the first read with done=true
+    // — drain while-loop yields terminal and returns cleanly.
+    const completed = {
+      job_id: 'done-while-term',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const sseText = `event: complete\ndata: ${JSON.stringify(completed)}\n\n`;
+    const chunk = new TextEncoder().encode(sseText);
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: chunk, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    for await (const sseFrame of client.streamJob('done-while-term')) {
+      seen.push(sseFrame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('streamJob: done=true trailing completed frame without blank line returns cleanly', async () => {
+    // done=true with a completed frame that has no blank-line boundary — while finds
+    // nothing; trailing buffer consume yields terminal and returns (no throw).
+    const completed = {
+      job_id: 'done-trail-term',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const fragment = new TextEncoder().encode(
+      `event: complete\ndata: ${JSON.stringify(completed)}\n`,
+    );
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: fragment, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    for await (const frame of client.streamJob('done-trail-term')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('streamJob: done=true comment frame then completed skips yieldFrame-null in drain while', async () => {
+    // done=true with a comment frame (no data) then terminal complete — drain while
+    // hits yieldFrame===null (line 489 false) then yields completed and returns.
+    const completed = {
+      job_id: 'done-keep-then-term',
+      kind: 'send',
+      status: 'completed',
+      progress: 1,
+      result: {
+        new_account_state_hash: '11'.repeat(32),
+        output_coins_root: '22'.repeat(32),
+        input_nullifiers_root: '33'.repeat(32),
+        output_coin_ids: ['aa'.repeat(32)],
+      },
+    };
+    const frames =
+      ': keepalive\n\n' +
+      `event: complete\ndata: ${JSON.stringify(completed)}\n\n`;
+    const chunk = new TextEncoder().encode(frames);
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: chunk, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    for await (const frame of client.streamJob('done-keep-then-term')) {
+      seen.push(frame.status);
+    }
+    expect(seen).toEqual(['completed']);
+  });
+
+  it('streamJob: done=true trailing comment without blank line throws without yielding', async () => {
+    // done=true trailing comment-only fragment (no \n\n) — while finds no boundary;
+    // trailing consume yields null (line 501 false); sawTerminal stays false → throw.
+    const fragment = new TextEncoder().encode(': keepalive\n');
+
+    const client = new ZkCoinsV1Client({
+      apiUrl: BASE,
+      network: 'testnet',
+      fetch: async () => {
+        let delivered = false;
+        const body = {
+          getReader() {
+            return {
+              async read() {
+                if (delivered) {
+                  return { value: undefined, done: true as const };
+                }
+                delivered = true;
+                return { value: fragment, done: true as const };
+              },
+              releaseLock() {},
+              cancel: async () => {},
+            };
+          },
+        };
+        const res = new Response(null, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          get: () => body,
+        });
+        return res;
+      },
+    });
+
+    const seen: string[] = [];
+    await expect(async () => {
+      for await (const frame of client.streamJob('done-trail-nodata')) {
+        seen.push(frame.status);
+      }
+    }).rejects.toThrow(/stream ended without terminal status/);
+    expect(seen).toEqual([]);
+  });
+
+  it('redacts machineCode when the JSON error field is the session token', async () => {
+    const token = 'tok-in-code-9f3a';
+    server.use(
+      http.get(`${BASE}/v1/account/state`, () =>
+        HttpResponse.json({ error: token, message: 'denied' }, { status: 401 }),
+      ),
+    );
+    try {
+      await newClient().getAccountState(token);
+      expect.unreachable('expected V1ApiError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(V1ApiError);
+      if (!(err instanceof V1ApiError)) throw err;
+      expect(err.machineCode).not.toContain(token);
+      expect(err.machineCode).toBe('<redacted-session-token>');
+      expect(err.message).not.toContain(token);
+      expect(err.rawBody).toEqual(expect.any(String));
+      expect(err.rawBody).not.toContain(token);
+    }
   });
 });
 
@@ -2731,6 +3362,25 @@ describe('AttestBalance request surface', () => {
         assetId: new Uint8Array(8),
       }),
     ).toThrow(/asset_id must be 32 bytes/);
+  });
+
+  it('buildAttestOwnershipProof rejects subject that does not match Pk0||nk_commit', () => {
+    const foreignSubject = encodeZkAddress(sha256(new Uint8Array(64)));
+    const goodChallenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: ATTEST_BALANCE_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildAttestOwnershipProof({
+        subject: foreignSubject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge: goodChallenge,
+        host,
+        assetId,
+      }),
+    ).toThrow(/subject does not match/);
   });
 
   // ---- 3. Signature round-trip (with and without ceilings) ----
@@ -3281,6 +3931,27 @@ describe('ViewGrant request surface', () => {
         grantExpiry,
       }),
     ).toThrow(/grantee_pk must be 32 bytes/);
+  });
+
+  it('buildIssueGrantOwnershipProof rejects subject that does not match Pk0||nk_commit', () => {
+    const foreignSubject = encodeZkAddress(sha256(new Uint8Array(64)));
+    const goodChallenge: PullChallenge = {
+      nonce: 'aa'.repeat(32),
+      expiry: '1700000000',
+      domain: ISSUE_GRANT_CHALLENGE_DOMAIN,
+    };
+    expect(() =>
+      buildIssueGrantOwnershipProof({
+        subject: foreignSubject,
+        sk0: sk0.secretKey,
+        nkCommit,
+        challenge: goodChallenge,
+        host,
+        granteePk,
+        scope: { allAssets: true },
+        grantExpiry,
+      }),
+    ).toThrow(/subject does not match/);
   });
 
   it('buildIssueGrantOwnershipProof rejects a contradictory asset scope', () => {

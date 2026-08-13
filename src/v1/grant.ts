@@ -16,7 +16,8 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 
 import { attestChallengeMessage } from './attest.js';
 import { decodeZkAddress } from './bech32m.js';
-import { decodeHexExact, encodeHexLower } from './hex.js';
+import { addressFromParts } from './delivery.js';
+import { bytesEqual, decodeHexExact, encodeHexLower } from './hex.js';
 import {
   chanBindForHost,
   parseExpiryDecimal,
@@ -252,6 +253,12 @@ export function buildIssueGrantOwnershipProof(input: {
   });
 
   const { pkBytes } = bip340NormaliseSecret(input.sk0);
+  const derived = addressFromParts(pkBytes, input.nkCommit);
+  if (!bytesEqual(derived, subjectRaw)) {
+    throw new Error(
+      'buildIssueGrantOwnershipProof: subject does not match SHA-256(Pk0 || nk_commit)',
+    );
+  }
   // BIP-340 over the 32-byte chal digest. noble normalises the secret;
   // zero aux-rand is fine for ownership proofs (not a transition nonce).
   const signature = schnorr.sign(chal, input.sk0, new Uint8Array(32));

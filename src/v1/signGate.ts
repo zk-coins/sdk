@@ -12,6 +12,7 @@ import {
   ProofDataHashRefusalError,
 } from './errors.js';
 import { bytesEqual, decodeHexExact, encodeHexLower } from './hex.js';
+import { xOnlyPubkeyFromSecret } from './keys.js';
 import type { Network } from './mstate.js';
 import { computeNpkCommit } from './ownership.js';
 import { hashProofData, type ProofData } from './proofData.js';
@@ -145,6 +146,13 @@ export function refuseOrSignTransition(input: {
       recomputed,
       serverClaimed: serverHash,
     });
+  }
+
+  // secretKey must derive the localPubkey the wallet bound above — otherwise
+  // the signature would open under a different key than the refused-or-matched head.
+  const derivedLocal = xOnlyPubkeyFromSecret(input.secretKey);
+  if (!bytesEqual(derivedLocal, input.localPubkey)) {
+    throw new Error('secretKey does not match localPubkey');
   }
 
   // Sign the **recomputed** digest under the wallet's network m_state.
