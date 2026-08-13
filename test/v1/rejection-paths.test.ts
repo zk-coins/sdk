@@ -48,12 +48,10 @@ import {
   redactBearerToken,
   refuseOrSignTransition,
   requireCanonicalScalar,
-  runWithRedrawBudget,
   SECP256K1_ORDER,
   seedFromMnemonicV1,
   serializeProofData,
   signBodyFromSignature,
-  signTransitionTrace,
   transitionRequestToJson,
   TransitionSignatureError,
   tweakScalarOrReject,
@@ -64,6 +62,7 @@ import {
   type ProofData,
   type TransitionRequest,
 } from '../../src/v1/index.js';
+import { runWithRedrawBudget, signTransitionTrace } from '../../src/v1/transitionSignature.js';
 
 const MNEMONIC =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';

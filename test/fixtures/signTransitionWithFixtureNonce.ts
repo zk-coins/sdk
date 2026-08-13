@@ -4,7 +4,7 @@
  * Lives under `test/` deliberately: the deterministic k' does not bind `m_SC`,
  * so two signatures under the same key/network/counter leak the secret scalar.
  * The public package surface exposes only the CSPRNG-nonce production path
- * (`signTransition` / `signTransitionTrace`).
+ * (`signTransition`).
  *
  * Rule (V.8):
  * ```
@@ -23,11 +23,10 @@ import {
   bip340NormaliseSecret,
   isAcceptableCommittedR,
   mStateBytes,
-  runWithRedrawBudget,
   tweakScalarOrReject,
   type Network,
-  type SignTrace,
 } from '../../src/v1/index.js';
+import { runWithRedrawBudget, type SignTrace } from '../../src/v1/transitionSignature.js';
 
 const Point = schnorr.Point;
 const { Fn } = Point;

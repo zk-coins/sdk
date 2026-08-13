@@ -62,7 +62,6 @@ describe('package barrel exports', () => {
       'serializeProofData',
       'hashProofData',
       'signTransition',
-      'signTransitionTrace',
       'verify',
       'commVerify',
       'aggregateSig',
@@ -112,5 +111,14 @@ describe('package barrel exports', () => {
     // Deterministic k' does not bind m_SC — must never ship on the package root.
     expect(Object.prototype.hasOwnProperty.call(sdk, 'signTransitionWithFixtureNonce')).toBe(false);
     expect((sdk as Record<string, unknown>).signTransitionWithFixtureNonce).toBeUndefined();
+  });
+
+  it('does not export internal sign-trace / redraw-budget helpers', () => {
+    for (const name of ['signTransitionTrace', 'runWithRedrawBudget', 'SignTrace'] as const) {
+      expect(Object.prototype.hasOwnProperty.call(sdk, name)).toBe(false);
+      expect((sdk as Record<string, unknown>)[name]).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(v1index, name)).toBe(false);
+      expect((v1index as Record<string, unknown>)[name]).toBeUndefined();
+    }
   });
 });

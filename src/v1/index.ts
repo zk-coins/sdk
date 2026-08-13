@@ -23,15 +23,12 @@ export {
   requireCanonicalScalar,
   tweakScalarOrReject,
   isAcceptableCommittedR,
-  runWithRedrawBudget,
   signTransition,
-  signTransitionTrace,
   signTransitionOverProofData,
   verify,
   commVerify,
   SECP256K1_ORDER,
   type TransitionSignature,
-  type SignTrace,
 } from './transitionSignature.js';
 
 export {
