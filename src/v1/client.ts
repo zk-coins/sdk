@@ -465,9 +465,7 @@ export class ZkCoinsV1Client {
               job: view.job,
             };
         const terminal =
-          view.status === 'completed' ||
-          view.status === 'failed' ||
-          view.status === 'cancelled';
+          view.status === 'completed' || view.status === 'failed' || view.status === 'cancelled';
         return { yieldFrame, terminal };
       };
 

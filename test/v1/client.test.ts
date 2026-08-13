@@ -1367,9 +1367,7 @@ describe('ZkCoinsV1Client request surface', () => {
           }),
         ),
       );
-      await expect(newClient().getJob(jobId)).rejects.toThrow(
-        /expected integer in \[0, 2\^31-1\]/,
-      );
+      await expect(newClient().getJob(jobId)).rejects.toThrow(/expected integer in \[0, 2\^31-1\]/);
     }
   });
 
@@ -3052,9 +3050,7 @@ describe('ZkCoinsV1Client fail-closed parsers (non-object wire bodies)', () => {
         output_coin_ids: ['aa'.repeat(32)],
       },
     };
-    const frames =
-      ': keepalive\n\n' +
-      `event: complete\ndata: ${JSON.stringify(completed)}\n\n`;
+    const frames = ': keepalive\n\n' + `event: complete\ndata: ${JSON.stringify(completed)}\n\n`;
     const chunk = new TextEncoder().encode(frames);
 
     const client = new ZkCoinsV1Client({
