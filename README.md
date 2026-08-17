@@ -30,7 +30,7 @@ zkCoins follows the **Bitcoin full-node model: your wallet trusts _your_ node, e
 
 `@zkcoins/sdk` is the **pure-TypeScript** wallet SDK — no WASM, no native modules. It runs identically in Node 22+, modern browsers, and React Native (Expo + bare workflow), so the same package serves the in-tree web app, Cake Wallet, and Layerz Wallet. One package covers:
 
-- **On-device key material** — BIP-39 mnemonic, BIP-32 HD derivation, BIP-340 Schnorr signing. Crypto comes from audited upstreams (`@scure/bip39`, `@scure/bip32`, `@noble/curves`, `@noble/hashes`) — no rolled crypto. The private key never leaves the wallet.
+- **On-device key material** — BIP-39 mnemonic, BIP-32 HD derivation, BIP-340 Schnorr signing. Crypto comes from audited upstreams (`@scure/bip39`, `@scure/bip32`, `@noble/curves`, `@noble/hashes`). The sole documented rolled-crypto exception is the in-tree Poseidon-over-Goldilocks / `E(·)` / `Hc` reference (`src/poseidon/`, vector-pinned); see [`CONTRIBUTING.md`](./CONTRIBUTING.md). The private key never leaves the wallet.
 - **`ZkCoinsClient`** — a typed REST client to a zkCoins node/API that mirrors every node endpoint a wallet legitimately reads or drives. Each response is validated against a Zod schema; a non-2xx maps onto a typed `ApiError` with no silent fallback.
 - **`ZkCoinsAccount`** — the high-level account adapter most integrators consume. It derives the account from a mnemonic and drives the full async **Jobs API** lifecycle (`/api/jobs/*`) for mint/send, polling jobs to completion for you.
 
@@ -111,7 +111,7 @@ npm run lint            # eslint --max-warnings 0 && prettier --check
 npm run lint:fix        # eslint --fix && prettier --write
 
 npm run test            # vitest unit tests
-npm run test:coverage   # 100% lines/functions/statements coverage gate on src/*
+npm run test:coverage   # 100% lines/functions/statements/branches coverage gate on src/*
 npm run test:cross      # JS-vs-Rust cross-tests — the load-bearing guarantee
                         # the pure-JS reimpl matches the protocol spec
 ```

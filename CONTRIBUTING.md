@@ -29,6 +29,8 @@ Cryptographic primitives come from audited upstream libraries:
 
 Do not roll your own crypto. If a primitive is missing, add it via these libraries (or escalate the discussion in an issue).
 
+**Documented exception — Poseidon-over-Goldilocks / `E(·)` / `Hc`.** The SDK is the pure-TypeScript **reference implementation** of the client-side Poseidon surface (spec §§1.7 / V.4) under `src/poseidon/`. That module is deliberately in-tree (not an audited upstream crate), because no suitable pure-JS library matches the protocol's Goldilocks Poseidon + encoding. It is pinned against independent Rust-generated vectors (`test/poseidon.test.ts`) and is the sole rolled-crypto exception this repo accepts. Everything else — BIP-39/32, secp256k1/Schnorr, SHA-256 — still comes only from the upstream list above.
+
 ## Branch flow
 
 ```
@@ -46,8 +48,8 @@ feature/* → develop → main
 Every PR must pass:
 
 1. **Lint + typecheck + build** — `npm run lint && npm run typecheck && npm run build`. `dist/` must be produced (ESM + CJS + `.d.ts`).
-2. **Unit tests with 100 % coverage gate** — `npm run test:coverage`. Vitest enforces `lines: 100, functions: 100, statements: 100, branches: 95` on `src/*` (excluding `src/index.ts` and `src/types.ts` which are pure re-exports). A line that genuinely cannot be hit either gets a test or a file-level exclusion with a one-line comment.
-3. **Cross-tests** — `npm run test:cross`. Spawns the Rust shim in `test/cross-rust/shim/` and compares JS vs Rust output for 100 randomized inputs per cryptographic primitive. **A green cross-test is the single load-bearing guarantee** that the pure-JS reimpl matches the protocol spec encoded in `zk-coins/app/rust/client/`.
+2. **Unit tests with 100 % coverage gate** — `npm run test:coverage`. Vitest enforces `lines: 100, functions: 100, statements: 100, branches: 100` on `src/*` (excluding `src/index.ts` and `src/types.ts` which are pure re-exports). A structurally unreachable sub-expression may carry a justified `/* v8 ignore next -- <reason> */` immediately before that sub-expression only. ~2^-256 hash/scalar edges without a production injection seam belong in this category (already documented in source at `tweakScalarOrReject` and `halfAgg.ts`); do not introduce a hasher seam. Do not use a file-level ignore for reachable logic.
+3. **Cross-tests** — `npm run test:cross`. Spawns the Rust shim in `test/cross-rust/shim/` (built with `cargo build --locked` against the checked-in `Cargo.lock`) and compares JS vs Rust output for 100 randomized inputs per cryptographic primitive, including 100 independent half-aggregation batches. **A green cross-test is the single load-bearing guarantee** that the pure-JS reimpl matches the protocol spec encoded in `zk-coins/app/rust/client/`.
 
 CI runs all three on every PR. Drafts skip CI by convention (re-enable by marking ready-for-review).
 

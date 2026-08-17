@@ -77,43 +77,49 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check if shim exists
-        id: shim
+      # Hard requirement: the shim is the load-bearing DoD §6(b) parity
+      # gate. A missing Cargo.toml is a failure, never a skip — a gate
+      # that cannot go red is not a gate.
+      - name: Require cross-rust shim sources
         run: |
-          if [ -f test/cross-rust/shim/Cargo.toml ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "::notice::Cross-test shim not yet present (test/cross-rust/shim/Cargo.toml missing). Skipping. Lands in a follow-up commit on the bootstrap PR."
+          if [ ! -f test/cross-rust/shim/Cargo.toml ]; then
+            echo "::error::test/cross-rust/shim/Cargo.toml is missing. Node↔SDK parity (DoD §6(b)) cannot run. See test/cross-rust/README.md."
+            exit 1
           fi
+          if [ ! -f test/cross-rust/cross.test.ts ]; then
+            echo "::error::test/cross-rust/cross.test.ts is missing. Parity suite is incomplete."
+            exit 1
+          fi
+          echo "cross-rust shim sources present"
 
       - uses: actions/setup-node@v6
-        if: steps.shim.outputs.exists == 'true'
         with:
           node-version-file: '.nvmrc'
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.shim.outputs.exists == 'true'
+
+      - name: Require shim Cargo.lock (reproducible reference)
+        run: |
+          if [ ! -f test/cross-rust/shim/Cargo.lock ]; then
+            echo "::error::test/cross-rust/shim/Cargo.lock is missing. Cross-tests must pin the Rust reference with --locked."
+            exit 1
+          fi
 
       - name: Cache Cargo registry + shim build
-        if: steps.shim.outputs.exists == 'true'
         uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             test/cross-rust/shim/target
-          key: cross-shim-${{ runner.os }}-${{ hashFiles('test/cross-rust/shim/Cargo.toml') }}
+          key: cross-shim-${{ runner.os }}-${{ hashFiles('test/cross-rust/shim/Cargo.toml', 'test/cross-rust/shim/Cargo.lock', 'test/cross-rust/shim/src/**') }}
 
-      - if: steps.shim.outputs.exists == 'true'
-        run: npm ci
+      - run: npm ci
 
-      - name: Build Rust shim
-        if: steps.shim.outputs.exists == 'true'
+      - name: Build Rust shim (locked)
         working-directory: test/cross-rust/shim
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Run cross-tests
-        if: steps.shim.outputs.exists == 'true'
         run: npm run test:cross

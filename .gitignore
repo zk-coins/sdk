@@ -9,9 +9,8 @@ coverage/
 # Dependencies
 node_modules/
 
-# Cross-test Rust shim
+# Cross-test Rust shim build artifacts (Cargo.lock is checked in for --locked builds)
 test/cross-rust/shim/target/
-test/cross-rust/shim/Cargo.lock
 
 # Editors
 .vscode/

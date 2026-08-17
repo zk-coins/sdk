@@ -8,6 +8,7 @@ import { hexToBytes } from '@noble/hashes/utils.js';
 import { JobFailedError } from '../src/errors.js';
 import { ZkCoinsAccount } from '../src/account.js';
 import { ZkCoinsClient } from '../src/client.js';
+import { API_URL } from '../src/config.js';
 import { buildClaimMessage, buildSendMessage } from '../src/messages.js';
 
 const BASE = 'https://account.test';
@@ -71,6 +72,13 @@ describe('ZkCoinsAccount.fromMnemonic', () => {
   it('constructs its own ZkCoinsClient when no override is passed', async () => {
     const account = await ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, 0, { apiUrl: BASE });
     expect(account.client).toBeInstanceOf(ZkCoinsClient);
+    expect(account.client.apiUrl).toBe(BASE);
+  });
+
+  it('uses the configured default API URL when no client options are passed', async () => {
+    const account = await ZkCoinsAccount.fromMnemonic(TEST_MNEMONIC, 0, {});
+    expect(account.client).toBeInstanceOf(ZkCoinsClient);
+    expect(account.client.apiUrl).toBe(API_URL);
   });
 });
 
@@ -687,6 +695,35 @@ describe('ZkCoinsAccount.pay (full send → commit lifecycle)', () => {
 });
 
 describe('ZkCoinsAccount.waitForJob', () => {
+  it('polls again when Retry-After is absent', async () => {
+    let polls = 0;
+    const jobId = 'job-without-retry-after';
+    const account = await newAccount();
+
+    server.use(
+      http.get(`${BASE}/api/jobs/${jobId}`, () => {
+        polls += 1;
+        return HttpResponse.json(
+          polls === 1
+            ? { status: 'proving', phase: 'proving' }
+            : {
+                status: 'completed',
+                phase: 'completed',
+                result: { success: true },
+              },
+        );
+      }),
+    );
+
+    const terminal = await account.waitForJob(
+      jobId,
+      new Set(['completed', 'failed', 'cancelled']),
+      { pollIntervalMs: 0 },
+    );
+
+    expect(terminal.status).toBe('completed');
+  });
+
   it('invokes onPhase once per distinct phase transition', async () => {
     let polls = 0;
     server.use(
@@ -725,6 +762,25 @@ describe('ZkCoinsAccount.waitForJob', () => {
     await expect(
       account.waitForJob('wj-2', new Set(['completed', 'failed', 'cancelled'])),
     ).rejects.toBeInstanceOf(JobFailedError);
+  });
+
+  it('preserves the server error on a failed terminal job', async () => {
+    server.use(
+      http.get(`${BASE}/api/jobs/wj-failed`, () =>
+        HttpResponse.json({
+          status: 'failed',
+          phase: 'failed',
+          error: 'proof verification failed',
+        }),
+      ),
+    );
+    const account = await newAccount();
+    await expect(
+      account.waitForJob('wj-failed', new Set(['completed', 'failed', 'cancelled'])),
+    ).rejects.toMatchObject({
+      status: 'failed',
+      serverError: 'proof verification failed',
+    });
   });
 
   it('times out if the job never reaches a stop status', async () => {

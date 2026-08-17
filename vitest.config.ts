@@ -11,18 +11,11 @@ export default defineConfig({
       reporter: ['text', 'html', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: ['src/index.ts', 'src/types.ts'],
-      // Lines / functions / statements are pinned at 100 % on the
-      // activated surface — these are the load-bearing guarantees.
-      // Branches are at 85 %: TypeScript's `strict-null-checks` +
-      // `exactOptionalPropertyTypes` produces extra "branches" that
-      // are unreachable in practice (the `signal ? { signal } : {}`
-      // spread pattern is the main culprit); aiming for 95 % drives
-      // synthetic tests without commensurate value. Real
-      // correctness regressions show up on lines / statements first.
+      // Money/crypto protocol code is held to complete coverage on every axis.
       thresholds: {
         lines: 100,
         functions: 100,
-        branches: 85,
+        branches: 100,
         statements: 100,
       },
     },
