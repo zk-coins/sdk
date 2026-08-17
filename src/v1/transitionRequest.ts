@@ -105,9 +105,7 @@ export type TransitionRequestReceive = TransitionBase & {
 };
 
 export type TransitionRequest =
-  | TransitionRequestSend
-  | TransitionRequestMint
-  | TransitionRequestReceive;
+  TransitionRequestSend | TransitionRequestMint | TransitionRequestReceive;
 
 /**
  * Runtime presence + form check for callers that are not type-checked.
