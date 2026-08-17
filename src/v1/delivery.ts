@@ -63,8 +63,7 @@ export interface InvoiceJson {
 
 /** Closed tagged union. Any other `type` is malformed. */
 export type DeliveryCredential =
-  | { type: 'invoice'; invoice: InvoiceJson }
-  | { type: 'profile'; event: NostrEventJson };
+  { type: 'invoice'; invoice: InvoiceJson } | { type: 'profile'; event: NostrEventJson };
 
 /** Payment-identity pin fields (§4.3). Keyed by `op_pubkey` at the store. */
 export interface PaymentIdentityPin {
