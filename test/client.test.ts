@@ -242,7 +242,11 @@ describe('ZkCoinsClient.history', () => {
         return HttpResponse.json({ items: [], total: 0, limit: 10, offset: 5 });
       }),
     );
-    await newClient().history('abcd', { limit: 10, offset: 5 });
+    await newClient().history('abcd', {
+      limit: 10,
+      offset: 5,
+      signal: new AbortController().signal,
+    });
     expect(params!.get('address')).toBe('abcd');
     expect(params!.get('limit')).toBe('10');
     expect(params!.get('offset')).toBe('5');
@@ -318,7 +322,7 @@ describe('ZkCoinsClient.getTransaction', () => {
         });
       }),
     );
-    await newClient().getTransaction(119, 'abcd');
+    await newClient().getTransaction(119, 'abcd', new AbortController().signal);
     expect(path).toBe('119');
     expect(address).toBe('abcd');
   });
@@ -440,7 +444,7 @@ describe('ZkCoinsClient.sendJob', () => {
       timestamp: 12345,
       asset_id: 'ab'.repeat(32),
     };
-    const r = await newClient().sendJob(req, 'send-key');
+    const r = await newClient().sendJob(req, 'send-key', new AbortController().signal);
     expect(body).toEqual(req);
     expect(key).toBe('send-key');
     expect(r.job_id).toBe('send-1');
@@ -558,7 +562,9 @@ describe('ZkCoinsClient.commitJob / cancelJob', () => {
       }),
     );
     const req = { proof_id: 5, public_key: 'aa', signature: 'bb', message: 'cc' };
-    await expect(newClient().commitJob('send-1', req)).resolves.toBeUndefined();
+    await expect(
+      newClient().commitJob('send-1', req, new AbortController().signal),
+    ).resolves.toBeUndefined();
     expect(body).toEqual(req);
     expect(path).toBe('send-1');
   });
@@ -583,7 +589,9 @@ describe('ZkCoinsClient.commitJob / cancelJob', () => {
     server.use(
       http.post(`${BASE}/api/jobs/:id/cancel`, () => HttpResponse.json({ status: 'cancelled' })),
     );
-    await expect(newClient().cancelJob('job-1')).resolves.toBeUndefined();
+    await expect(
+      newClient().cancelJob('job-1', new AbortController().signal),
+    ).resolves.toBeUndefined();
   });
 
   it('cancelJob surfaces a 409 (no longer cancellable) as ApiError', async () => {
@@ -593,6 +601,16 @@ describe('ZkCoinsClient.commitJob / cancelJob', () => {
       ),
     );
     await expect(newClient().cancelJob('job-1')).rejects.toThrow(/cancellable/);
+  });
+
+  it('accepts a future successful empty response body', async () => {
+    server.use(
+      http.post(`${BASE}/api/jobs/:id/commit`, () => new HttpResponse(null, { status: 204 })),
+      http.post(`${BASE}/api/jobs/:id/cancel`, () => new HttpResponse(null, { status: 204 })),
+    );
+    const req = { proof_id: 5, public_key: 'aa', signature: 'bb', message: 'cc' };
+    await expect(newClient().commitJob('send-empty', req)).resolves.toBeUndefined();
+    await expect(newClient().cancelJob('cancel-empty')).resolves.toBeUndefined();
   });
 });
 
@@ -605,7 +623,7 @@ describe('ZkCoinsClient.streamJob (SSE)', () => {
 
   it('yields each phase frame and stops after event: complete', async () => {
     const frames =
-      'event: phase\ndata: {"status":"proving","phase":"proving","proof_id":null,"result":null,"error":null}\n\n' +
+      'event: phase\nunknown-field: ignored\ndata: {"status":"proving","phase":"proving","proof_id":null,"result":null,"error":null}\n\n' +
       ': heartbeat\n\n' +
       'event: phase\ndata: {"status":"awaiting_signature","phase":"awaiting_signature","proof_id":17,"result":null,"error":null}\n\n' +
       'event: complete\ndata: {"status":"completed","phase":"completed","proof_id":null,"result":{"success":true,"proof_id":3},"error":null}\n\n';
@@ -742,7 +760,7 @@ describe('ZkCoinsClient.resolveUsername / claimUsername', () => {
         return HttpResponse.json({ username: 'a b', address: 'cd' });
       }),
     );
-    await newClient().resolveUsername('a b');
+    await newClient().resolveUsername('a b', new AbortController().signal);
     expect(observed).toBe('a b');
   });
 
@@ -761,7 +779,7 @@ describe('ZkCoinsClient.resolveUsername / claimUsername', () => {
       signature: 'ef',
       timestamp: 1,
     };
-    const r = await newClient().claimUsername(req);
+    const r = await newClient().claimUsername(req, new AbortController().signal);
     expect(observed).toEqual(req);
     expect(r.username).toBe('satoshi');
   });
@@ -866,16 +884,16 @@ describe('ZkCoinsClient.root', () => {
       openapi: 'GET  /openapi.json',
       docs: 'GET  /docs',
     },
-    docs: 'https://docs.zkcoins.app',
+    docs: 'https://docs.zkcoins.com',
   };
 
   it('parses the service-info envelope', async () => {
     server.use(http.get(`${BASE}/`, () => HttpResponse.json(rootBody)));
-    const r = await newClient().root();
+    const r = await newClient().root(new AbortController().signal);
     expect(r.service).toBe('zkcoins-node');
     expect(r.network).toBe('Mutinynet');
     expect(r.endpoints.health_ready).toBe('GET  /health/ready');
-    expect(r.docs).toBe('https://docs.zkcoins.app');
+    expect(r.docs).toBe('https://docs.zkcoins.com');
   });
 
   it('throws ZodError when a required endpoints field is missing', async () => {
@@ -1019,7 +1037,7 @@ describe('ZkCoinsClient.publisherHealth', () => {
         HttpResponse.json({ address: 'tb1pxyz', utxo_count: 1, total_sats: 992746 }),
       ),
     );
-    const r = await newClient().publisherHealth();
+    const r = await newClient().publisherHealth(new AbortController().signal);
     expect(r.address).toBe('tb1pxyz');
     expect(r.utxo_count).toBe(1);
     expect(r.total_sats).toBe(992746);
@@ -1050,7 +1068,7 @@ describe('ZkCoinsClient.addresses', () => {
     server.use(
       http.get(`${BASE}/api/address`, () => HttpResponse.json({ addresses: ['0xaa', '0xbb'] })),
     );
-    const r = await newClient().addresses();
+    const r = await newClient().addresses(new AbortController().signal);
     expect(r.addresses).toEqual(['0xaa', '0xbb']);
   });
 
@@ -1078,7 +1096,7 @@ describe('ZkCoinsClient.inscription', () => {
         });
       }),
     );
-    const r = await newClient().inscription('ab'.repeat(32));
+    const r = await newClient().inscription('ab'.repeat(32), new AbortController().signal);
     expect(observed).toBe('ab'.repeat(32));
     expect(r.kind).toBe('mint');
     expect(r.reveal_txid).toBe('cd'.repeat(32));
